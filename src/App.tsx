@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 type SpectrumPoint = { f: number; a: number };
 type MetricKey = "rms" | "peak" | "kurtosis" | "crest" | "bpfo";
-type NodeType = "source" | "feature" | "condition" | "logic" | "output";
+type NodeType = "source" | "feature" | "condition" | "logic" | "output" | "report";
 type FlowNode = {
   id: string;
   type: NodeType;
@@ -35,6 +35,7 @@ const starterNodes: FlowNode[] = [
   { id: "c-rms", type: "condition", title: "振动强度判断", metric: "rms", operator: ">", threshold: 0.2, x: 495, y: 340 },
   { id: "and", type: "logic", title: "全部满足", logic: "AND", x: 720, y: 220 },
   { id: "result", type: "output", title: "诊断结果", x: 945, y: 220 },
+  { id: "report", type: "report", title: "报告导出", x: 1170, y: 220 },
 ];
 
 const starterConnections: Connection[] = [
@@ -45,6 +46,7 @@ const starterConnections: Connection[] = [
   { id: "e5", source: "c-bpfo", target: "and" },
   { id: "e6", source: "c-rms", target: "and" },
   { id: "e7", source: "and", target: "result" },
+  { id: "e8", source: "result", target: "report" },
 ];
 
 const palette = [
@@ -64,6 +66,7 @@ const palette = [
   ]},
   { group: "诊断输出", items: [
     { type: "output" as NodeType, title: "诊断结果", icon: "!", desc: "故障结论" },
+    { type: "report" as NodeType, title: "报告导出", icon: "W", desc: "下载 Word" },
   ]},
 ];
 
@@ -160,6 +163,19 @@ export default function Home() {
     return { rms, peak, kurtosis: squareMean ? fourth / squareMean ** 2 : 0, crest: rms ? peak / rms : 0, bpfo: Math.max(0, ...band.map((point) => point.a)) };
   }, [samples, spectrum, fs, bpfo]);
 
+  function connectNodes(source: string, target: string) {
+    const sourceNode = nodes.find((node) => node.id === source);
+    const targetNode = nodes.find((node) => node.id === target);
+    if (!sourceNode || !targetNode || source === target) return;
+    if (sourceNode.type === "report") { notify("报告导出是终端节点，不能继续向后连线"); return; }
+    if (targetNode.type === "report" && sourceNode.type !== "output") { notify("报告导出只能连接在诊断结果后面"); return; }
+    setConnections((current) => {
+      const base = targetNode.type === "report" ? current.filter((edge) => edge.target !== target) : current;
+      return base.some((edge) => edge.source === source && edge.target === target) ? base : [...base, { id: `edge-${Date.now()}`, source, target }];
+    });
+    setDiagnosis(null);
+  }
+
   useEffect(() => {
     const handleMove = (event: PointerEvent) => {
       const viewport = canvasViewportRef.current;
@@ -180,9 +196,7 @@ export default function Home() {
         const element = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
         const targetElement = element?.closest("[data-input-node]") as HTMLElement | null;
         const target = targetElement?.dataset.inputNode;
-        if (target && target !== source) {
-          setConnections((current) => current.some((edge) => edge.source === source && edge.target === target) ? current : [...current, { id: `edge-${Date.now()}`, source, target }]);
-        }
+        if (target && target !== source) connectNodes(source, target);
         linkRef.current = null;
         setDraftLink(null);
       }
@@ -190,7 +204,7 @@ export default function Home() {
     window.addEventListener("pointermove", handleMove);
     window.addEventListener("pointerup", handleUp);
     return () => { window.removeEventListener("pointermove", handleMove); window.removeEventListener("pointerup", handleUp); };
-  }, []);
+  }, [nodes]);
 
   function notify(text: string) {
     setToast(text);
@@ -232,10 +246,7 @@ export default function Home() {
   function finishConnection(event: React.PointerEvent, target: string) {
     event.preventDefault(); event.stopPropagation();
     const source = linkRef.current?.source;
-    if (source && source !== target) {
-      setConnections((current) => current.some((edge) => edge.source === source && edge.target === target) ? current : [...current, { id: `edge-${Date.now()}`, source, target }]);
-      setDiagnosis(null);
-    }
+    if (source && source !== target) connectNodes(source, target);
     linkRef.current = null;
     setDraftLink(null);
   }
@@ -289,6 +300,74 @@ export default function Home() {
     return connections.filter((edge) => edge.target === id).flatMap((edge) => conditionIdsUpstream(edge.source, visited));
   }
 
+  function connectedOutputForReport(reportId: string) {
+    const outputId = connections.find((edge) => edge.target === reportId)?.source;
+    return nodes.find((node) => node.id === outputId && node.type === "output");
+  }
+
+  async function downloadReport(reportId: string) {
+    const output = connectedOutputForReport(reportId);
+    if (!output) { notify("请先把报告导出连接到诊断结果节点"); return; }
+    if (!diagnosis) { notify("请先运行诊断，再导出报告"); return; }
+
+    const conditionIds = [...new Set(conditionIdsUpstream(output.id))];
+    const conditions = conditionIds.map((id) => nodes.find((node) => node.id === id)).filter((node): node is FlowNode => Boolean(node));
+    const matched = conditions.filter((node) => evaluateNode(node.id)).length;
+    const fault = evaluateNode(output.id);
+    const conclusion = fault ? "疑似轴承外圈故障" : "未触发故障规则";
+    const generatedAt = new Date();
+    const generatedText = generatedAt.toLocaleString("zh-CN", { hour12: false });
+    const { AlignmentType, Document, HeadingLevel, Packer, Paragraph, Table, TableCell, TableRow, TextRun, WidthType } = await import("docx");
+    const metricRows = (Object.keys(metricInfo) as MetricKey[]).map((key) => [metricInfo[key].label, metrics[key].toFixed(key === "kurtosis" || key === "crest" ? 2 : 3), metricInfo[key].unit]);
+    const conditionRows = conditions.map((node) => {
+      const key = node.metric ?? "rms";
+      return [node.title, metricInfo[key].label, metrics[key].toFixed(3), `${node.operator === ">" ? "大于" : "小于"} ${node.threshold ?? 0}`, evaluateNode(node.id) ? "满足" : "未满足"];
+    });
+    const makeCell = (text: string, bold = false) => new TableCell({ children: [new Paragraph({ children: [new TextRun({ text, bold, font: "Microsoft YaHei" })] })] });
+    const makeTable = (rows: string[][]) => new Table({
+      width: { size: 100, type: WidthType.PERCENTAGE },
+      rows: rows.map((row, rowIndex) => new TableRow({ children: row.map((value) => makeCell(value, rowIndex === 0)) })),
+    });
+
+    const report = new Document({ sections: [{ children: [
+      new Paragraph({ text: "振动信号故障诊断报告", heading: HeadingLevel.TITLE, alignment: AlignmentType.CENTER }),
+      new Paragraph({ children: [new TextRun({ text: `诊断结论：${conclusion}`, bold: true, size: 30, color: fault ? "C62828" : "167D56", font: "Microsoft YaHei" })] }),
+      new Paragraph({ text: `规则结果：满足 ${matched}/${conditions.length} 个条件` }),
+      new Paragraph({ text: "一、数据与设备参数", heading: HeadingLevel.HEADING_1 }),
+      makeTable([
+        ["项目", "内容"],
+        ["数据文件", fileName],
+        ["采样点数", samples.length.toLocaleString()],
+        ["采样频率", `${fs} Hz`],
+        ["设备转速", `${rpm} rpm`],
+        ["轴承外圈故障频率 BPFO", `${bpfo} Hz`],
+        ["报告生成时间", generatedText],
+      ]),
+      new Paragraph({ text: "二、特征指标", heading: HeadingLevel.HEADING_1 }),
+      makeTable([["指标", "计算值", "单位"], ...metricRows]),
+      new Paragraph({ text: "三、诊断规则明细", heading: HeadingLevel.HEADING_1 }),
+      makeTable([["条件节点", "指标", "当前值", "判断规则", "结果"], ...conditionRows]),
+      new Paragraph({ text: "四、诊断结论", heading: HeadingLevel.HEADING_1 }),
+      new Paragraph({ children: [new TextRun({ text: conclusion, bold: true, font: "Microsoft YaHei" })] }),
+      new Paragraph({ text: fault ? "当前信号同时满足所连接的故障判据，建议结合设备工况、包络谱及现场检查进一步确认轴承外圈状态。" : "当前信号未同时满足所连接的故障判据，建议持续监测趋势，并结合设备工况复核阈值设置。" }),
+      new Paragraph({ text: "说明：本报告由 VibRule 低代码振动诊断平台依据当前画布连线、参数和导入信号自动生成。", spacing: { before: 320 } }),
+    ] }] });
+
+    try {
+      const blob = await Packer.toBlob(report);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      const baseName = fileName.replace(/\.[^.]+$/, "").replace(/[\\/:*?"<>|]/g, "_").slice(0, 60) || "振动信号";
+      const stamp = generatedAt.toISOString().replace(/[-:]/g, "").slice(0, 15).replace("T", "_");
+      link.href = url; link.download = `VibRule_${baseName}_${stamp}.docx`;
+      document.body.appendChild(link); link.click(); link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1500);
+      notify("Word 诊断报告已生成");
+    } catch {
+      notify("报告生成失败，请重新尝试");
+    }
+  }
+
   function runDiagnosis() {
     if (!samples.length) { notify("请先导入波形或载入演示数据"); return; }
     const outputs = nodes.filter((node) => node.type === "output");
@@ -326,7 +405,7 @@ export default function Home() {
       </aside>
 
       <section className="canvas-area">
-        <div className="canvas-toolbar"><div><strong>外圈故障诊断流程</strong><span>拖动节点；从右侧端口拖线到另一个节点左侧端口</span></div><div className="legend"><span><i className="source-dot"/>数据</span><span><i className="feature-dot"/>计算</span><span><i className="condition-dot"/>条件</span><span><i className="output-dot"/>输出</span></div></div>
+        <div className="canvas-toolbar"><div><strong>外圈故障诊断流程</strong><span>拖动节点；从右侧端口拖线到另一个节点左侧端口</span></div><div className="legend"><span><i className="source-dot"/>数据</span><span><i className="feature-dot"/>计算</span><span><i className="condition-dot"/>条件</span><span><i className="output-dot"/>输出</span><span><i className="report-dot"/>报告</span></div></div>
         <div className="canvas-viewport" ref={canvasViewportRef} onDragOver={(event) => {event.preventDefault();event.dataTransfer.dropEffect="copy";}} onDrop={addNodeFromPalette} onClick={() => setSelected(null)}>
           <div className="canvas-plane">
             <svg className="edge-layer" width="1600" height="900">
@@ -340,13 +419,14 @@ export default function Home() {
             </svg>
             {nodes.map((node) => <article key={node.id} className={`flow-node ${node.type} ${selected===node.id?"selected":""}`} style={{left:node.x,top:node.y}} onPointerDown={(event)=>startNodeDrag(event,node.id)} onClick={(event)=>{event.stopPropagation();setSelected(node.id);}}>
               <button className="input-port port" data-input-node={node.id} aria-label={`连接到${node.title}`} onPointerUp={(event)=>finishConnection(event,node.id)}/>
-              <button className="output-port port" aria-label={`从${node.title}开始连线`} onPointerDown={(event)=>startConnection(event,node.id)}/>
-              <header><span className="node-type-icon">{node.type==="source"?"∿":node.type==="feature"?"ƒ":node.type==="condition"?"?":node.type==="logic"?(node.logic==="AND"?"&":"≥1"):"!"}</span><div><small>{node.type==="source"?"数据输入":node.type==="feature"?"信号处理":node.type==="condition"?"条件判断":node.type==="logic"?"逻辑组合":"诊断输出"}</small><strong>{node.title}</strong></div><button className="node-delete" aria-label="删除节点" onClick={()=>removeNode(node.id)}>×</button></header>
+              {node.type !== "report" && <button className="output-port port" aria-label={`从${node.title}开始连线`} onPointerDown={(event)=>startConnection(event,node.id)}/>}
+              <header><span className="node-type-icon">{node.type==="source"?"∿":node.type==="feature"?"ƒ":node.type==="condition"?"?":node.type==="logic"?(node.logic==="AND"?"&":"≥1"):node.type==="report"?"W":"!"}</span><div><small>{node.type==="source"?"数据输入":node.type==="feature"?"信号处理":node.type==="condition"?"条件判断":node.type==="logic"?"逻辑组合":node.type==="report"?"报告输出":"诊断输出"}</small><strong>{node.title}</strong></div><button className="node-delete" aria-label="删除节点" onClick={()=>removeNode(node.id)}>×</button></header>
               {node.type === "source" && <div className="node-body wave-body"><TinyWave samples={samples}/><span>{samples.length?`${samples.length.toLocaleString()} 点` : "等待导入"}</span></div>}
               {node.type === "feature" && node.metric && <div className="node-body value-body"><span>{metricInfo[node.metric].label}</span><strong>{metrics[node.metric].toFixed(node.metric==="kurtosis"||node.metric==="crest"?2:3)}</strong><small>{metricInfo[node.metric].unit}</small></div>}
               {node.type === "condition" && <div className="node-body condition-body"><select value={node.metric} onChange={(event)=>updateNode(node.id,{metric:event.target.value as MetricKey})}>{Object.entries(metricInfo).map(([key,info])=><option value={key} key={key}>{info.label}</option>)}</select><div><select value={node.operator} onChange={(event)=>updateNode(node.id,{operator:event.target.value as ">"|"<"})}><option value=">">大于</option><option value="<">小于</option></select><input value={node.threshold} type="number" step="0.01" onChange={(event)=>updateNode(node.id,{threshold:Number(event.target.value)})}/></div><small className={evaluateNode(node.id)?"pass":""}>当前 {node.metric?metrics[node.metric].toFixed(3):"—"} · {evaluateNode(node.id)?"满足":"未满足"}</small></div>}
               {node.type === "logic" && <div className="node-body logic-body"><div><button className={node.logic==="AND"?"active":""} onClick={()=>updateNode(node.id,{logic:"AND",title:"全部满足"})}>AND</button><button className={node.logic==="OR"?"active":""} onClick={()=>updateNode(node.id,{logic:"OR",title:"任一满足"})}>OR</button></div><small>{connections.filter((edge)=>edge.target===node.id).length} 个输入</small></div>}
               {node.type === "output" && <div className={`node-body output-body ${diagnosis?(diagnosis.fault?"fault":"normal"):""}`}><span>{diagnosis?(diagnosis.fault?"!":"✓"):"?"}</span><div><strong>{resultText}</strong><small>{diagnosis?`满足 ${diagnosis.matched}/${diagnosis.total} 个条件`:"点击右上角运行"}</small></div></div>}
+              {node.type === "report" && (() => { const output=connectedOutputForReport(node.id); const ready=Boolean(output&&diagnosis); return <div className={`node-body report-body ${ready?"ready":""}`}><div><span>DOCX</span><small>{!output?"请连接诊断结果":diagnosis?"报告内容已就绪":"运行诊断后下载"}</small></div><button disabled={!ready} onClick={()=>downloadReport(node.id)}>↓ 下载 Word</button></div>; })()}
             </article>)}
             <div className="canvas-tip">提示：拖动节点调整位置；拖动端口创建连线；点击连线即可删除</div>
           </div>
