@@ -215,6 +215,63 @@ function SpectrumChart({ spectrum, minHz = 0, maxHz, peaks = [] }: { spectrum: S
   </svg>;
 }
 
+function inferDisplayMode(node: FlowNode, inputNode?: FlowNode): Exclude<DisplayMode, "auto"> {
+  if (node.displayMode && node.displayMode !== "auto") return node.displayMode;
+  if (inputNode?.type === "source") return "waveform";
+  if (inputNode?.type === "peakSearch" || (inputNode?.type === "feature" && inputNode.title.includes("FFT"))) return "spectrum";
+  return "value";
+}
+
+function DetailedWave({ samples, fs }: { samples: number[]; fs: number }) {
+  const width = 920, height = 340, left = 62, right = 18, top = 20, bottom = 46;
+  const plotWidth = width - left - right, plotHeight = height - top - bottom;
+  const maxAbs = Math.max(1e-9, samples.reduce((largest, value) => Math.max(largest, Math.abs(value)), 0));
+  const bucketCount = Math.min(Math.max(1, Math.floor(plotWidth)), Math.max(1, samples.length));
+  const y = (value: number) => top + plotHeight / 2 - value / maxAbs * plotHeight * .46;
+  const envelope = Array.from({ length: bucketCount }, (_, index) => {
+    const from = Math.floor(index / bucketCount * samples.length);
+    const to = Math.max(from + 1, Math.floor((index + 1) / bucketCount * samples.length));
+    let min = 0, max = 0;
+    for (let i = from; i < Math.min(to, samples.length); i++) { min = Math.min(min, samples[i]); max = Math.max(max, samples[i]); }
+    const x = left + index / Math.max(1, bucketCount - 1) * plotWidth;
+    return `M${x.toFixed(2)},${y(max).toFixed(2)} L${x.toFixed(2)},${y(min).toFixed(2)}`;
+  }).join(" ");
+  const duration = samples.length / Math.max(1, fs);
+  return <svg className="detail-chart" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none">
+    {Array.from({length:5},(_,index)=>{const gy=top+index/4*plotHeight;return <line className="detail-grid" key={`h${index}`} x1={left} y1={gy} x2={width-right} y2={gy}/>;})}
+    {Array.from({length:6},(_,index)=>{const gx=left+index/5*plotWidth;return <g key={`v${index}`}><line className="detail-grid" x1={gx} y1={top} x2={gx} y2={top+plotHeight}/><text x={gx} y={height-18} textAnchor="middle">{(duration*index/5).toFixed(3)} s</text></g>;})}
+    <line className="detail-axis" x1={left} y1={y(0)} x2={width-right} y2={y(0)}/>
+    <text x={left-10} y={top+8} textAnchor="end">{maxAbs.toFixed(3)}</text><text x={left-10} y={y(0)+4} textAnchor="end">0</text><text x={left-10} y={top+plotHeight} textAnchor="end">-{maxAbs.toFixed(3)}</text>
+    {samples.length > 0 && <path className="detail-wave-path" d={envelope}/>} 
+    <text className="axis-title" x={18} y={height/2} textAnchor="middle" transform={`rotate(-90 18 ${height/2})`}>幅值</text>
+    <text className="axis-title" x={left+plotWidth/2} y={height-2} textAnchor="middle">时间</text>
+  </svg>;
+}
+
+function DetailedSpectrum({ spectrum, minHz, maxHz, peaks = [] }: { spectrum: SpectrumPoint[]; minHz: number; maxHz: number; peaks?: PeakResult[] }) {
+  const width = 920, height = 340, left = 62, right = 18, top = 20, bottom = 46;
+  const plotWidth = width - left - right, plotHeight = height - top - bottom;
+  const start = Math.min(minHz, maxHz), end = Math.max(minHz, maxHz);
+  const band = spectrum.filter((point)=>point.f>=start&&point.f<=end);
+  const bucketCount = Math.min(Math.max(1, Math.floor(plotWidth)), Math.max(1, band.length));
+  const buckets = Array.from({length:bucketCount},(_,index)=>{
+    const from=Math.floor(index/bucketCount*band.length),to=Math.max(from+1,Math.floor((index+1)/bucketCount*band.length));
+    return band.slice(from,to).reduce((best,point)=>point.a>best?point.a:best,0);
+  });
+  const maxAmplitude=Math.max(1e-9,...buckets,...peaks.map((point)=>point.a));
+  const x=(frequency:number)=>left+(frequency-start)/Math.max(1e-9,end-start)*plotWidth;
+  const y=(amplitude:number)=>top+plotHeight-amplitude/maxAmplitude*plotHeight*.94;
+  const line=buckets.map((value,index)=>`${left+index/Math.max(1,bucketCount-1)*plotWidth},${y(value)}`).join(" ");
+  return <svg className="detail-chart" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none">
+    {Array.from({length:5},(_,index)=>{const gy=top+index/4*plotHeight;return <g key={`h${index}`}><line className="detail-grid" x1={left} y1={gy} x2={width-right} y2={gy}/><text x={left-10} y={gy+4} textAnchor="end">{(maxAmplitude*(1-index/4)).toFixed(3)}</text></g>;})}
+    {Array.from({length:6},(_,index)=>{const frequency=start+(end-start)*index/5,gx=x(frequency);return <g key={`v${index}`}><line className="detail-grid" x1={gx} y1={top} x2={gx} y2={top+plotHeight}/><text x={gx} y={height-18} textAnchor="middle">{frequency.toFixed(1)}</text></g>;})}
+    {band.length>0&&<polyline className="detail-spectrum-path" points={line}/>} 
+    {peaks.slice(0,40).map((peak,index)=><g key={`${peak.f}-${index}`}><line className="detail-peak-line" x1={x(peak.f)} y1={top} x2={x(peak.f)} y2={top+plotHeight}/><circle className="detail-peak-dot" cx={x(peak.f)} cy={y(peak.a)} r="4"/><text className="detail-peak-label" x={x(peak.f)+5} y={Math.max(top+10,y(peak.a)-7)}>{peak.order?`${peak.order}× `:""}{peak.f.toFixed(2)} Hz</text></g>)}
+    <text className="axis-title" x={18} y={height/2} textAnchor="middle" transform={`rotate(-90 18 ${height/2})`}>幅值</text>
+    <text className="axis-title" x={left+plotWidth/2} y={height-2} textAnchor="middle">频率 / Hz</text>
+  </svg>;
+}
+
 function TinyWave({ samples }: { samples: number[] }) {
   const values = samples.length ? Array.from({ length: 44 }, (_, i) => samples[Math.floor(i / 43 * (samples.length - 1))]) : [];
   const max = Math.max(1e-8, ...values.map(Math.abs));
@@ -236,6 +293,7 @@ export default function Home() {
   const [draftLink, setDraftLink] = useState<{ source: string; x: number; y: number } | null>(null);
   const [canvasView, setCanvasViewState] = useState<CanvasView>(INITIAL_VIEW);
   const [isPanning, setIsPanning] = useState(false);
+  const [previewNodeId, setPreviewNodeId] = useState<string | null>(null);
   const canvasViewportRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ id: string; dx: number; dy: number } | null>(null);
   const linkRef = useRef<{ source: string } | null>(null);
@@ -255,6 +313,7 @@ export default function Home() {
     const band = spectrum.filter((point) => Math.abs(point.f - bpfo) <= Math.max(2 * resolution, 1));
     return { rms, peak, kurtosis: squareMean ? fourth / squareMean ** 2 : 0, crest: rms ? peak / rms : 0, bpfo: Math.max(0, ...band.map((point) => point.a)) };
   }, [samples, spectrum, fs, bpfo]);
+  const signalRange = useMemo(() => samples.length ? samples.reduce((range, value) => ({ min: Math.min(range.min, value), max: Math.max(range.max, value) }), { min: samples[0], max: samples[0] }) : { min: 0, max: 0 }, [samples]);
   const peakSearchNodes = nodes.filter((node) => node.type === "peakSearch");
   const peakSearchKey = peakSearchNodes.map((node) => [node.id, node.searchMode, node.searchMinHz, node.searchMaxHz, node.energyRatio, node.harmonicCount, node.toleranceHz].join(":" )).join("|");
   const peakResultsById = useMemo(() => new Map(peakSearchNodes.map((node) => [node.id, searchSpectrumPeaks(spectrum, node, bpfo)])), [spectrum, bpfo, peakSearchKey]);
@@ -362,6 +421,13 @@ export default function Home() {
     return () => viewport.removeEventListener("wheel", handleWheel);
   }, []);
 
+  useEffect(() => {
+    if (!previewNodeId) return;
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") setPreviewNodeId(null); };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [previewNodeId]);
+
   function notify(text: string) {
     setToast(text);
     window.setTimeout(() => setToast(""), 2300);
@@ -383,7 +449,7 @@ export default function Home() {
 
   function startNodeDrag(event: React.PointerEvent, id: string) {
     const target = event.target as HTMLElement;
-    if (target.closest("button,input,select,.port")) return;
+    if (target.closest("button,input,select,.port,.chart-preview")) return;
     const node = nodes.find((item) => item.id === id);
     if (!node) return;
     const point = screenToCanvas(event.clientX, event.clientY);
@@ -441,6 +507,7 @@ export default function Home() {
     setNodes((current) => current.filter((node) => node.id !== id));
     setConnections((current) => current.filter((edge) => edge.source !== id && edge.target !== id));
     setSelected((current) => current === id ? null : current); setDiagnosis(null);
+    setPreviewNodeId((current) => current === id ? null : current);
   }
 
   function evaluateNode(id: string, visiting = new Set<string>()): boolean {
@@ -549,6 +616,16 @@ export default function Home() {
   const nodeById = new Map(nodes.map((node) => [node.id, node]));
   const selectedNode = nodes.find((node) => node.id === selected);
   const resultText = diagnosis ? (diagnosis.fault ? "疑似轴承外圈故障" : "未触发故障规则") : "等待运行";
+  const previewNode = previewNodeId ? nodeById.get(previewNodeId) : undefined;
+  const previewInputId = previewNode ? connections.find((edge) => edge.target === previewNode.id)?.source : undefined;
+  const previewInputNode = previewInputId ? nodeById.get(previewInputId) : undefined;
+  const previewMode = previewNode ? inferDisplayMode(previewNode, previewInputNode) : "waveform";
+  const previewSearchResult = previewInputNode?.type === "peakSearch" ? peakResultsById.get(previewInputNode.id) : undefined;
+  const previewMinHz = previewInputNode?.type === "peakSearch" ? previewInputNode.searchMinHz ?? 0 : 0;
+  const previewMaxHz = previewInputNode?.type === "peakSearch" ? previewInputNode.searchMaxHz ?? fs / 2 : fs / 2;
+  const previewSpectrumBand = spectrum.filter((point) => point.f >= Math.min(previewMinHz, previewMaxHz) && point.f <= Math.max(previewMinHz, previewMaxHz));
+  const previewSpectrumMax = previewSpectrumBand.reduce((best, point) => point.a > best.a ? point : best, { f: 0, a: 0 });
+  const spectrumResolution = spectrum.length > 1 ? spectrum[1].f - spectrum[0].f : 0;
 
   return <main className="flow-app">
     <header className="flow-header">
@@ -622,13 +699,19 @@ export default function Home() {
               {node.type === "display" && (() => {
                 const inputId = connections.find((edge)=>edge.target===node.id)?.source;
                 const inputNode = inputId ? nodeById.get(inputId) : undefined;
-                const automaticMode: Exclude<DisplayMode,"auto"> = inputNode?.type==="source" ? "waveform" : inputNode?.type==="peakSearch" || (inputNode?.type==="feature"&&inputNode.title.includes("FFT")) ? "spectrum" : "value";
-                const mode = node.displayMode === "auto" || !node.displayMode ? automaticMode : node.displayMode;
+                const mode = inferDisplayMode(node, inputNode);
                 const searchResult = inputNode?.type==="peakSearch" ? peakResultsById.get(inputNode.id) : undefined;
                 const minHz = inputNode?.type==="peakSearch" ? inputNode.searchMinHz ?? 0 : 0;
                 const maxHz = inputNode?.type==="peakSearch" ? inputNode.searchMaxHz ?? fs/2 : fs/2;
                 const metric = inputNode?.metric;
-                return <div className="node-body display-body"><div className="display-controls"><select aria-label="显示数据类型" value={node.displayMode ?? "auto"} onChange={(event)=>updateNode(node.id,{displayMode:event.target.value as DisplayMode})}><option value="auto">自动识别</option><option value="waveform">波形</option><option value="spectrum">频谱</option><option value="value">数值</option></select><span>{inputNode?`来源：${inputNode.title}`:"等待连接数据"}</span></div>{inputNode&&mode==="waveform"&&<><DataWave samples={samples}/><div className="chart-axis"><span>0 s</span><b>时域波形</b><span>{(samples.length/fs).toFixed(2)} s</span></div></>}{inputNode&&mode==="spectrum"&&<><SpectrumChart spectrum={spectrum} minHz={minHz} maxHz={maxHz} peaks={searchResult?.peaks}/><div className="chart-axis"><span>{minHz.toFixed(0)} Hz</span><b>{searchResult?.peaks.length?`${searchResult.peaks.length} 个峰值已标记`:"幅值谱"}</b><span>{maxHz.toFixed(0)} Hz</span></div></>}{inputNode&&mode==="value"&&<div className="display-value"><span>{metric?metricInfo[metric].label:"数据值"}</span><strong>{metric?metrics[metric].toFixed(metric==="kurtosis"||metric==="crest"?2:3):"—"}</strong><small>{metric?metricInfo[metric].unit:"当前输入无标量值"}</small></div>}{!inputNode&&<div className="display-empty"><span>▥</span><p>连接波形、FFT 频谱或峰值搜索节点</p></div>}</div>;
+                const openPreview = (event: React.MouseEvent) => { event.stopPropagation(); setPreviewNodeId(node.id); };
+                return <div className="node-body display-body">
+                  <div className="display-controls"><select aria-label="显示数据类型" value={node.displayMode ?? "auto"} onChange={(event)=>updateNode(node.id,{displayMode:event.target.value as DisplayMode})}><option value="auto">自动识别</option><option value="waveform">波形</option><option value="spectrum">频谱</option><option value="value">数值</option></select><span>{inputNode?`来源：${inputNode.title}`:"等待连接数据"}</span><button className="open-preview" disabled={!inputNode} onClick={openPreview}>放大</button></div>
+                  {inputNode&&mode==="waveform"&&<button type="button" className="chart-preview" onClick={openPreview}><DataWave samples={samples}/><div className="chart-axis"><span>0 s</span><b>点击查看真实数据</b><span>{(samples.length/fs).toFixed(2)} s</span></div></button>}
+                  {inputNode&&mode==="spectrum"&&<button type="button" className="chart-preview" onClick={openPreview}><SpectrumChart spectrum={spectrum} minHz={minHz} maxHz={maxHz} peaks={searchResult?.peaks}/><div className="chart-axis"><span>{minHz.toFixed(0)} Hz</span><b>{searchResult?.peaks.length?`${searchResult.peaks.length} 个峰值已标记`:"点击查看真实频谱"}</b><span>{maxHz.toFixed(0)} Hz</span></div></button>}
+                  {inputNode&&mode==="value"&&<button type="button" className="chart-preview" onClick={openPreview}><div className="display-value"><span>{metric?metricInfo[metric].label:"数据值"}</span><strong>{metric?metrics[metric].toFixed(metric==="kurtosis"||metric==="crest"?2:3):"—"}</strong><small>{metric?metricInfo[metric].unit:"当前输入无标量值"}</small></div></button>}
+                  {!inputNode&&<div className="display-empty"><span>▥</span><p>连接波形、FFT 频谱或峰值搜索节点</p></div>}
+                </div>;
               })()}
               {node.type === "output" && <div className={`node-body output-body ${diagnosis?(diagnosis.fault?"fault":"normal"):""}`}><span>{diagnosis?(diagnosis.fault?"!":"✓"):"?"}</span><div><strong>{resultText}</strong><small>{diagnosis?`满足 ${diagnosis.matched}/${diagnosis.total} 个条件`:"点击右上角运行"}</small></div></div>}
               {node.type === "report" && (() => { const output=connectedOutputForReport(node.id); const ready=Boolean(output&&diagnosis); return <div className={`node-body report-body ${ready?"ready":""}`}><div><span>DOCX</span><small>{!output?"请连接诊断结果":diagnosis?"报告内容已就绪":"运行诊断后下载"}</small></div><button disabled={!ready} onClick={()=>downloadReport(node.id)}>↓ 下载 Word</button></div>; })()}
@@ -640,5 +723,63 @@ export default function Home() {
       </section>
     </div>
     {toast && <div className="toast">{toast}</div>}
+    {previewNode && previewInputNode && <div className="data-modal-backdrop" onPointerDown={(event)=>{if(event.target===event.currentTarget)setPreviewNodeId(null);}}>
+      <section className="data-modal" role="dialog" aria-modal="true" aria-label="接入数据详情" onPointerDown={(event)=>event.stopPropagation()}>
+        <header className="data-modal-header">
+          <div className="modal-title-icon">{previewMode==="waveform"?"∿":previewMode==="spectrum"?"⌁":"#"}</div>
+          <div>
+            <span>接入数据详情</span>
+            <h2>{previewMode==="waveform"?"真实波形数据":previewMode==="spectrum"?"真实频谱数据":"真实计算数据"}</h2>
+            <p>{fileName} · 来源节点：{previewInputNode.title}</p>
+          </div>
+          <button className="modal-close" aria-label="关闭数据详情" onClick={()=>setPreviewNodeId(null)}>×</button>
+        </header>
+
+        <div className="modal-data-summary">
+          <span className="modal-badge live"><i/>当前接入数据</span>
+          <span className="modal-badge">采样频率 {fs.toLocaleString()} Hz</span>
+          <span className="modal-badge">{samples.length.toLocaleString()} 个原始采样点</span>
+          {previewMode==="spectrum"&&<span className="modal-badge">频段 {Math.min(previewMinHz,previewMaxHz).toFixed(1)}–{Math.max(previewMinHz,previewMaxHz).toFixed(1)} Hz</span>}
+        </div>
+
+        <div className="detail-chart-panel">
+          {!samples.length&&<div className="modal-empty"><span>∿</span><strong>等待真实数据</strong><p>请先从左侧导入 TXT / CSV 波形，或载入演示波形。</p></div>}
+          {samples.length>0&&previewMode==="waveform"&&<DetailedWave samples={samples} fs={fs}/>} 
+          {samples.length>0&&previewMode==="spectrum"&&<DetailedSpectrum spectrum={spectrum} minHz={previewMinHz} maxHz={previewMaxHz} peaks={previewSearchResult?.peaks}/>} 
+          {samples.length>0&&previewMode==="value"&&<div className="modal-value"><span>{previewInputNode.metric?metricInfo[previewInputNode.metric].label:"当前计算值"}</span><strong>{previewInputNode.metric?metrics[previewInputNode.metric].toFixed(previewInputNode.metric==="kurtosis"||previewInputNode.metric==="crest"?3:4):"—"}</strong><small>{previewInputNode.metric?metricInfo[previewInputNode.metric].unit:"当前输入没有可展示的标量值"}</small></div>}
+        </div>
+
+        {previewMode==="waveform"&&<div className="data-stats-grid">
+          <div><span>采样点数</span><strong>{samples.length.toLocaleString()}</strong><small>points</small></div>
+          <div><span>采样时长</span><strong>{(samples.length/Math.max(1,fs)).toFixed(4)}</strong><small>s</small></div>
+          <div><span>最小幅值</span><strong>{signalRange.min.toFixed(4)}</strong><small>signal</small></div>
+          <div><span>最大幅值</span><strong>{signalRange.max.toFixed(4)}</strong><small>signal</small></div>
+          <div><span>有效值 RMS</span><strong>{metrics.rms.toFixed(4)}</strong><small>signal</small></div>
+          <div><span>峰值</span><strong>{metrics.peak.toFixed(4)}</strong><small>signal</small></div>
+        </div>}
+
+        {previewMode==="spectrum"&&<div className="data-stats-grid">
+          <div><span>频谱点数</span><strong>{previewSpectrumBand.length.toLocaleString()}</strong><small>bins</small></div>
+          <div><span>频率分辨率</span><strong>{spectrumResolution.toFixed(4)}</strong><small>Hz</small></div>
+          <div><span>分析频段</span><strong>{Math.min(previewMinHz,previewMaxHz).toFixed(1)}–{Math.max(previewMinHz,previewMaxHz).toFixed(1)}</strong><small>Hz</small></div>
+          <div><span>最大峰频率</span><strong>{previewSpectrumMax.f.toFixed(2)}</strong><small>Hz</small></div>
+          <div><span>最大峰幅值</span><strong>{previewSpectrumMax.a.toFixed(4)}</strong><small>amplitude</small></div>
+          <div><span>已搜索峰值</span><strong>{previewSearchResult?.peaks.length ?? 0}</strong><small>peaks</small></div>
+        </div>}
+
+        {previewMode==="value"&&previewInputNode.metric&&<div className="data-stats-grid value-stats">
+          <div><span>指标名称</span><strong>{metricInfo[previewInputNode.metric].label}</strong><small>{previewInputNode.title}</small></div>
+          <div><span>当前计算值</span><strong>{metrics[previewInputNode.metric].toFixed(5)}</strong><small>{metricInfo[previewInputNode.metric].unit}</small></div>
+          <div><span>输入采样点</span><strong>{samples.length.toLocaleString()}</strong><small>points</small></div>
+        </div>}
+
+        {previewSearchResult&&previewSearchResult.peaks.length>0&&<section className="modal-peak-section">
+          <div className="peak-section-title"><div><span>峰值搜索明细</span><h3>{previewSearchResult.peaks.length} 个真实频谱峰值</h3></div><small>搜索峰值能量占比 {previewSearchResult.energyPercent.toFixed(1)}%</small></div>
+          <div className="peak-table-wrap"><table><thead><tr><th>序号</th>{previewSearchResult.peaks.some((peak)=>peak.theoretical!==undefined)&&<th>理论频率</th>}<th>搜索频率</th>{previewSearchResult.peaks.some((peak)=>peak.theoretical!==undefined)&&<th>偏差</th>}<th>峰值幅值</th></tr></thead><tbody>{previewSearchResult.peaks.slice(0,40).map((peak,index)=><tr key={`${peak.f}-${index}`}><td>{peak.order?`${peak.order} 倍频`:`#${index+1}`}</td>{peak.theoretical!==undefined&&<td>{peak.theoretical.toFixed(2)} Hz</td>}<td><b>{peak.f.toFixed(3)} Hz</b></td>{peak.theoretical!==undefined&&<td>{(peak.f-peak.theoretical).toFixed(3)} Hz</td>}<td>{peak.a.toFixed(5)}</td></tr>)}</tbody></table></div>
+        </section>}
+
+        <footer className="modal-note"><span>i</span><p>图形来自当前连接链路的真实数据。波形大图使用全部 {samples.length.toLocaleString()} 个采样点生成逐像素极值包络，频谱由当前采样率下的 FFT 结果绘制；缩放显示不会修改原始数据。</p></footer>
+      </section>
+    </div>}
   </main>;
 }
