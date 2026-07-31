@@ -15,9 +15,13 @@ type FlowNode = {
   logic?: "AND" | "OR";
 };
 type Connection = { id: string; source: string; target: string };
+type CanvasView = { x: number; y: number; scale: number };
 
-const NODE_WIDTH = 200;
-const PORT_Y = 44;
+const NODE_WIDTH = 220;
+const PORT_Y = 49;
+const INITIAL_VIEW: CanvasView = { x: 48, y: 30, scale: 0.82 };
+const MIN_SCALE = 0.4;
+const MAX_SCALE = 1.8;
 
 const metricInfo: Record<MetricKey, { label: string; unit: string }> = {
   rms: { label: "有效值", unit: "信号单位" },
@@ -28,14 +32,14 @@ const metricInfo: Record<MetricKey, { label: string; unit: string }> = {
 };
 
 const starterNodes: FlowNode[] = [
-  { id: "wave", type: "source", title: "振动波形", x: 45, y: 235 },
-  { id: "fft", type: "feature", title: "FFT 频谱", metric: "bpfo", x: 270, y: 105 },
-  { id: "rms", type: "feature", title: "有效值计算", metric: "rms", x: 270, y: 340 },
-  { id: "c-bpfo", type: "condition", title: "外圈频率判断", metric: "bpfo", operator: ">", threshold: 0.08, x: 495, y: 90 },
-  { id: "c-rms", type: "condition", title: "振动强度判断", metric: "rms", operator: ">", threshold: 0.2, x: 495, y: 340 },
-  { id: "and", type: "logic", title: "全部满足", logic: "AND", x: 720, y: 220 },
-  { id: "result", type: "output", title: "诊断结果", x: 945, y: 220 },
-  { id: "report", type: "report", title: "报告导出", x: 1170, y: 220 },
+  { id: "wave", type: "source", title: "振动波形", x: 40, y: 260 },
+  { id: "fft", type: "feature", title: "FFT 频谱", metric: "bpfo", x: 320, y: 100 },
+  { id: "rms", type: "feature", title: "有效值计算", metric: "rms", x: 320, y: 390 },
+  { id: "c-bpfo", type: "condition", title: "外圈频率判断", metric: "bpfo", operator: ">", threshold: 0.08, x: 600, y: 90 },
+  { id: "c-rms", type: "condition", title: "振动强度判断", metric: "rms", operator: ">", threshold: 0.2, x: 600, y: 390 },
+  { id: "and", type: "logic", title: "全部满足", logic: "AND", x: 880, y: 245 },
+  { id: "result", type: "output", title: "诊断结果", x: 1160, y: 245 },
+  { id: "report", type: "report", title: "报告导出", x: 1440, y: 245 },
 ];
 
 const starterConnections: Connection[] = [
@@ -145,9 +149,13 @@ export default function Home() {
   const [diagnosis, setDiagnosis] = useState<{ fault: boolean; matched: number; total: number } | null>(null);
   const [toast, setToast] = useState("");
   const [draftLink, setDraftLink] = useState<{ source: string; x: number; y: number } | null>(null);
+  const [canvasView, setCanvasViewState] = useState<CanvasView>(INITIAL_VIEW);
+  const [isPanning, setIsPanning] = useState(false);
   const canvasViewportRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ id: string; dx: number; dy: number } | null>(null);
   const linkRef = useRef<{ source: string } | null>(null);
+  const panRef = useRef<{ startX: number; startY: number; originX: number; originY: number } | null>(null);
+  const viewRef = useRef<CanvasView>(INITIAL_VIEW);
 
   const spectrum = useMemo(() => samples.length >= 64 ? calculateSpectrum(samples, fs) : [], [samples, fs]);
   const metrics = useMemo(() => {
@@ -176,21 +184,61 @@ export default function Home() {
     setDiagnosis(null);
   }
 
+  function setCanvasView(next: CanvasView | ((current: CanvasView) => CanvasView)) {
+    setCanvasViewState((current) => {
+      const resolved = typeof next === "function" ? next(current) : next;
+      viewRef.current = resolved;
+      return resolved;
+    });
+  }
+
+  function screenToCanvas(clientX: number, clientY: number) {
+    const viewport = canvasViewportRef.current;
+    if (!viewport) return { x: 0, y: 0 };
+    const rect = viewport.getBoundingClientRect();
+    const view = viewRef.current;
+    return {
+      x: (clientX - rect.left - view.x) / view.scale,
+      y: (clientY - rect.top - view.y) / view.scale,
+    };
+  }
+
+  function zoomCanvas(targetScale: number, anchorX?: number, anchorY?: number) {
+    const viewport = canvasViewportRef.current;
+    if (!viewport) return;
+    const rect = viewport.getBoundingClientRect();
+    const px = anchorX ?? rect.width / 2;
+    const py = anchorY ?? rect.height / 2;
+    setCanvasView((current) => {
+      const scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, targetScale));
+      const worldX = (px - current.x) / current.scale;
+      const worldY = (py - current.y) / current.scale;
+      return { x: px - worldX * scale, y: py - worldY * scale, scale };
+    });
+  }
+
   useEffect(() => {
     const handleMove = (event: PointerEvent) => {
-      const viewport = canvasViewportRef.current;
-      if (!viewport) return;
-      const rect = viewport.getBoundingClientRect();
+      if (panRef.current) {
+        const { startX, startY, originX, originY } = panRef.current;
+        setCanvasView((current) => ({ ...current, x: originX + event.clientX - startX, y: originY + event.clientY - startY }));
+      }
       if (dragRef.current) {
         const { id, dx, dy } = dragRef.current;
-        const x = Math.max(12, event.clientX - rect.left + viewport.scrollLeft - dx);
-        const y = Math.max(12, event.clientY - rect.top + viewport.scrollTop - dy);
+        const point = screenToCanvas(event.clientX, event.clientY);
+        const x = point.x - dx;
+        const y = point.y - dy;
         setNodes((current) => current.map((node) => node.id === id ? { ...node, x, y } : node));
       }
-      if (linkRef.current) setDraftLink({ source: linkRef.current.source, x: event.clientX - rect.left + viewport.scrollLeft, y: event.clientY - rect.top + viewport.scrollTop });
+      if (linkRef.current) {
+        const point = screenToCanvas(event.clientX, event.clientY);
+        setDraftLink({ source: linkRef.current.source, ...point });
+      }
     };
     const handleUp = (event: PointerEvent) => {
       dragRef.current = null;
+      panRef.current = null;
+      setIsPanning(false);
       if (linkRef.current) {
         const source = linkRef.current.source;
         const element = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
@@ -205,6 +253,23 @@ export default function Home() {
     window.addEventListener("pointerup", handleUp);
     return () => { window.removeEventListener("pointermove", handleMove); window.removeEventListener("pointerup", handleUp); };
   }, [nodes]);
+
+  useEffect(() => {
+    const viewport = canvasViewportRef.current;
+    if (!viewport) return;
+    const handleWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      if (event.ctrlKey) {
+        const rect = viewport.getBoundingClientRect();
+        const factor = Math.exp(-event.deltaY * 0.0015);
+        zoomCanvas(viewRef.current.scale * factor, event.clientX - rect.left, event.clientY - rect.top);
+      } else {
+        setCanvasView((current) => ({ ...current, x: current.x - event.deltaX, y: current.y - event.deltaY }));
+      }
+    };
+    viewport.addEventListener("wheel", handleWheel, { passive: false });
+    return () => viewport.removeEventListener("wheel", handleWheel);
+  }, []);
 
   function notify(text: string) {
     setToast(text);
@@ -228,19 +293,29 @@ export default function Home() {
   function startNodeDrag(event: React.PointerEvent, id: string) {
     const target = event.target as HTMLElement;
     if (target.closest("button,input,select,.port")) return;
-    const nodeElement = event.currentTarget as HTMLElement;
-    const rect = nodeElement.getBoundingClientRect();
-    dragRef.current = { id, dx: event.clientX - rect.left, dy: event.clientY - rect.top };
+    const node = nodes.find((item) => item.id === id);
+    if (!node) return;
+    const point = screenToCanvas(event.clientX, event.clientY);
+    dragRef.current = { id, dx: point.x - node.x, dy: point.y - node.y };
     setSelected(id);
+  }
+
+  function startCanvasPan(event: React.PointerEvent<HTMLDivElement>) {
+    if (event.button !== 0 && event.button !== 1) return;
+    const target = event.target as HTMLElement;
+    if (target.closest(".flow-node,.edge-layer path,button,input,select,.canvas-tip")) return;
+    event.preventDefault();
+    const view = viewRef.current;
+    panRef.current = { startX: event.clientX, startY: event.clientY, originX: view.x, originY: view.y };
+    setIsPanning(true);
+    setSelected(null);
   }
 
   function startConnection(event: React.PointerEvent, source: string) {
     event.preventDefault(); event.stopPropagation();
-    const viewport = canvasViewportRef.current;
-    if (!viewport) return;
-    const rect = viewport.getBoundingClientRect();
+    const point = screenToCanvas(event.clientX, event.clientY);
     linkRef.current = { source };
-    setDraftLink({ source, x: event.clientX - rect.left + viewport.scrollLeft, y: event.clientY - rect.top + viewport.scrollTop });
+    setDraftLink({ source, ...point });
   }
 
   function finishConnection(event: React.PointerEvent, target: string) {
@@ -256,11 +331,10 @@ export default function Home() {
     const payload = event.dataTransfer.getData("application/x-vibrule-node");
     if (!payload) return;
     const item = JSON.parse(payload) as { type: NodeType; title: string; metric?: MetricKey; logic?: "AND" | "OR" };
-    const viewport = canvasViewportRef.current;
-    if (!viewport) return;
-    const rect = viewport.getBoundingClientRect();
+    if (!canvasViewportRef.current) return;
+    const point = screenToCanvas(event.clientX, event.clientY);
     const id = `node-${Date.now()}`;
-    setNodes((current) => [...current, { id, type: item.type, title: item.title, metric: item.metric, logic: item.logic, operator: ">", threshold: item.metric === "kurtosis" ? 3.5 : .2, x: event.clientX - rect.left + viewport.scrollLeft - NODE_WIDTH / 2, y: event.clientY - rect.top + viewport.scrollTop - PORT_Y }]);
+    setNodes((current) => [...current, { id, type: item.type, title: item.title, metric: item.metric, logic: item.logic, operator: ">", threshold: item.metric === "kurtosis" ? 3.5 : .2, x: point.x - NODE_WIDTH / 2, y: point.y - PORT_Y }]);
     setSelected(id); setDiagnosis(null);
   }
 
@@ -384,10 +458,10 @@ export default function Home() {
 
   return <main className="flow-app">
     <header className="flow-header">
-      <div className="flow-brand"><span>∿</span><div><strong>VibRule</strong><small>低代码振动诊断</small></div></div>
+      <div className="flow-brand"><span>∿</span><div><strong>VibRule</strong><small>工业振动规则诊断平台</small></div></div>
       <div className="flow-actions">
         <span className="data-state"><i className={samples.length ? "ready" : ""}/>{samples.length ? `${fileName} · ${samples.length.toLocaleString()} 点` : "尚未导入波形"}</span>
-        <button className="ghost-button" onClick={() => {setNodes(starterNodes);setConnections(starterConnections);setDiagnosis(null);}}>恢复示例</button>
+        <button className="ghost-button" onClick={() => {setNodes(starterNodes);setConnections(starterConnections);setDiagnosis(null);setCanvasView(INITIAL_VIEW);}}>恢复示例</button>
         <button className="ghost-button" onClick={() => {setConnections([]);setDiagnosis(null);}}>清空连线</button>
         <button className="run-button" onClick={runDiagnosis}>▶ 运行诊断</button>
       </div>
@@ -405,10 +479,24 @@ export default function Home() {
       </aside>
 
       <section className="canvas-area">
-        <div className="canvas-toolbar"><div><strong>外圈故障诊断流程</strong><span>拖动节点；从右侧端口拖线到另一个节点左侧端口</span></div><div className="legend"><span><i className="source-dot"/>数据</span><span><i className="feature-dot"/>计算</span><span><i className="condition-dot"/>条件</span><span><i className="output-dot"/>输出</span><span><i className="report-dot"/>报告</span></div></div>
-        <div className="canvas-viewport" ref={canvasViewportRef} onDragOver={(event) => {event.preventDefault();event.dataTransfer.dropEffect="copy";}} onDrop={addNodeFromPalette} onClick={() => setSelected(null)}>
-          <div className="canvas-plane">
-            <svg className="edge-layer" width="1600" height="900">
+        <div className="canvas-toolbar">
+          <div className="canvas-title"><strong>外圈故障诊断流程</strong><span>拖动空白区域平移画布 · 拖动端口自由连线</span></div>
+          <div className="canvas-tools">
+            <div className="legend"><span><i className="source-dot"/>数据</span><span><i className="feature-dot"/>计算</span><span><i className="condition-dot"/>条件</span><span><i className="output-dot"/>输出</span><span><i className="report-dot"/>报告</span></div>
+            <div className="zoom-control"><button aria-label="缩小画布" onClick={() => zoomCanvas(canvasView.scale - .1)}>−</button><button className="zoom-value" onClick={() => setCanvasView(INITIAL_VIEW)}>{Math.round(canvasView.scale * 100)}%</button><button aria-label="放大画布" onClick={() => zoomCanvas(canvasView.scale + .1)}>＋</button><button className="view-reset" onClick={() => setCanvasView(INITIAL_VIEW)}>复位</button></div>
+          </div>
+        </div>
+        <div
+          className={`canvas-viewport ${isPanning ? "panning" : ""}`}
+          ref={canvasViewportRef}
+          style={{ backgroundSize: `${24 * canvasView.scale}px ${24 * canvasView.scale}px`, backgroundPosition: `${canvasView.x}px ${canvasView.y}px` }}
+          onPointerDown={startCanvasPan}
+          onDragOver={(event) => {event.preventDefault();event.dataTransfer.dropEffect="copy";}}
+          onDrop={addNodeFromPalette}
+          onClick={() => setSelected(null)}
+        >
+          <div className="canvas-plane" style={{ transform: `translate(${canvasView.x}px, ${canvasView.y}px) scale(${canvasView.scale})` }}>
+            <svg className="edge-layer" width="1" height="1">
               {connections.map((edge) => {
                 const source = nodeById.get(edge.source), target = nodeById.get(edge.target);
                 if (!source || !target) return null;
@@ -428,8 +516,8 @@ export default function Home() {
               {node.type === "output" && <div className={`node-body output-body ${diagnosis?(diagnosis.fault?"fault":"normal"):""}`}><span>{diagnosis?(diagnosis.fault?"!":"✓"):"?"}</span><div><strong>{resultText}</strong><small>{diagnosis?`满足 ${diagnosis.matched}/${diagnosis.total} 个条件`:"点击右上角运行"}</small></div></div>}
               {node.type === "report" && (() => { const output=connectedOutputForReport(node.id); const ready=Boolean(output&&diagnosis); return <div className={`node-body report-body ${ready?"ready":""}`}><div><span>DOCX</span><small>{!output?"请连接诊断结果":diagnosis?"报告内容已就绪":"运行诊断后下载"}</small></div><button disabled={!ready} onClick={()=>downloadReport(node.id)}>↓ 下载 Word</button></div>; })()}
             </article>)}
-            <div className="canvas-tip">提示：拖动节点调整位置；拖动端口创建连线；点击连线即可删除</div>
           </div>
+          <div className="canvas-tip"><b>无限画布</b><span>拖动空白处平移 · Ctrl + 滚轮缩放 · 点击连线删除</span></div>
         </div>
         {selectedNode && <div className="selection-chip"><span>已选择</span><b>{selectedNode.title}</b><small>位置 {Math.round(selectedNode.x)}, {Math.round(selectedNode.y)}</small></div>}
       </section>
