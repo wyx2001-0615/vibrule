@@ -2,7 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 type SpectrumPoint = { f: number; a: number };
 type MetricKey = "rms" | "peak" | "kurtosis" | "crest" | "bpfo";
-type NodeType = "source" | "feature" | "condition" | "logic" | "output" | "report";
+type NodeType = "source" | "feature" | "peakSearch" | "condition" | "logic" | "display" | "output" | "report";
+type SearchMode = "energy" | "harmonic";
+type DisplayMode = "auto" | "waveform" | "spectrum" | "value";
 type FlowNode = {
   id: string;
   type: NodeType;
@@ -13,9 +15,18 @@ type FlowNode = {
   operator?: ">" | "<";
   threshold?: number;
   logic?: "AND" | "OR";
+  displayMode?: DisplayMode;
+  searchMode?: SearchMode;
+  searchMinHz?: number;
+  searchMaxHz?: number;
+  energyRatio?: number;
+  harmonicCount?: number;
+  toleranceHz?: number;
 };
 type Connection = { id: string; source: string; target: string };
 type CanvasView = { x: number; y: number; scale: number };
+type PeakResult = SpectrumPoint & { order?: number; theoretical?: number };
+type PeakSearchResult = { peaks: PeakResult[]; energyPercent: number; bandPointCount: number };
 
 const NODE_WIDTH = 220;
 const PORT_Y = 49;
@@ -62,6 +73,7 @@ const palette = [
     { type: "feature" as NodeType, title: "FFT 频谱", metric: "bpfo" as MetricKey, icon: "F", desc: "频率幅值" },
     { type: "feature" as NodeType, title: "峭度计算", metric: "kurtosis" as MetricKey, icon: "K", desc: "冲击指标" },
     { type: "feature" as NodeType, title: "峰值计算", metric: "peak" as MetricKey, icon: "P", desc: "最大幅值" },
+    { type: "peakSearch" as NodeType, title: "峰值搜索", icon: "⌃", desc: "能量 / 倍频" },
   ]},
   { group: "条件与逻辑", items: [
     { type: "condition" as NodeType, title: "阈值判断", metric: "rms" as MetricKey, icon: "?", desc: "大于 / 小于" },
@@ -69,6 +81,7 @@ const palette = [
     { type: "logic" as NodeType, title: "任一满足", logic: "OR" as const, icon: "≥1", desc: "OR" },
   ]},
   { group: "诊断输出", items: [
+    { type: "display" as NodeType, title: "数据显示", icon: "▥", desc: "波形 / 频谱" },
     { type: "output" as NodeType, title: "诊断结果", icon: "!", desc: "故障结论" },
     { type: "report" as NodeType, title: "报告导出", icon: "W", desc: "下载 Word" },
   ]},
@@ -130,6 +143,78 @@ function generateDemo(fs: number, rpm: number, bpfo: number) {
   });
 }
 
+function searchSpectrumPeaks(points: SpectrumPoint[], node: FlowNode, baseFrequency: number): PeakSearchResult {
+  if (!points.length) return { peaks: [], energyPercent: 0, bandPointCount: 0 };
+  const nyquist = points[points.length - 1]?.f ?? 0;
+  const rawMin = Math.max(0, node.searchMinHz ?? 0);
+  const rawMax = Math.min(nyquist, node.searchMaxHz ?? Math.min(1000, nyquist));
+  const minHz = Math.min(rawMin, rawMax);
+  const maxHz = Math.max(rawMin, rawMax);
+  const band = points.filter((point) => point.f >= minHz && point.f <= maxHz);
+  if (!band.length) return { peaks: [], energyPercent: 0, bandPointCount: 0 };
+
+  let localPeaks = band.filter((point, index) => {
+    if (index === 0 || index === band.length - 1) return false;
+    return point.a > band[index - 1].a && point.a >= band[index + 1].a;
+  });
+  if (!localPeaks.length) localPeaks = [band.reduce((best, point) => point.a > best.a ? point : best, band[0])];
+  const localEnergy = localPeaks.reduce((sum, point) => sum + point.a ** 2, 0);
+
+  if ((node.searchMode ?? "energy") === "harmonic") {
+    const count = Math.max(1, Math.min(20, Math.round(node.harmonicCount ?? 3)));
+    const tolerance = Math.max(0.1, node.toleranceHz ?? 3);
+    const peaks: PeakResult[] = [];
+    for (let order = 1; order <= count; order++) {
+      const theoretical = baseFrequency * order;
+      if (theoretical < minHz || theoretical > maxHz) continue;
+      const window = band.filter((point) => Math.abs(point.f - theoretical) <= tolerance);
+      if (!window.length) continue;
+      const best = window.reduce((current, point) => point.a > current.a ? point : current, window[0]);
+      peaks.push({ ...best, order, theoretical });
+    }
+    const selectedEnergy = peaks.reduce((sum, point) => sum + point.a ** 2, 0);
+    return { peaks, energyPercent: localEnergy ? selectedEnergy / localEnergy * 100 : 0, bandPointCount: band.length };
+  }
+
+  const limit = Math.max(1, Math.min(100, node.energyRatio ?? 80)) / 100;
+  const sorted = [...localPeaks].sort((a, b) => b.a - a.a);
+  const selected: PeakResult[] = [];
+  let accumulated = 0;
+  for (const point of sorted) {
+    const next = accumulated + point.a ** 2;
+    if (selected.length && localEnergy && next / localEnergy > limit) break;
+    selected.push(point);
+    accumulated = next;
+  }
+  return { peaks: selected, energyPercent: localEnergy ? accumulated / localEnergy * 100 : 0, bandPointCount: band.length };
+}
+
+function DataWave({ samples }: { samples: number[] }) {
+  const values = samples.length ? Array.from({ length: 96 }, (_, index) => samples[Math.floor(index / 95 * (samples.length - 1))]) : [];
+  const max = Math.max(1e-8, ...values.map(Math.abs));
+  const points = values.map((value, index) => `${index / 95 * 196},${36 - value / max * 29}`).join(" ");
+  return <svg className="data-chart data-wave" viewBox="0 0 196 72" preserveAspectRatio="none"><line x1="0" y1="36" x2="196" y2="36"/>{values.length > 0 && <polyline points={points}/>}</svg>;
+}
+
+function SpectrumChart({ spectrum, minHz = 0, maxHz, peaks = [] }: { spectrum: SpectrumPoint[]; minHz?: number; maxHz?: number; peaks?: PeakResult[] }) {
+  const endHz = maxHz ?? spectrum[spectrum.length - 1]?.f ?? 0;
+  const startHz = Math.min(minHz, endHz);
+  const band = spectrum.filter((point) => point.f >= startHz && point.f <= endHz);
+  const buckets = Array.from({ length: 96 }, (_, index) => {
+    const from = Math.floor(index / 96 * band.length);
+    const to = Math.max(from + 1, Math.floor((index + 1) / 96 * band.length));
+    return band.slice(from, to).reduce((best, point) => point.a > best ? point.a : best, 0);
+  });
+  const maxAmplitude = Math.max(1e-9, ...buckets, ...peaks.map((point) => point.a));
+  const polyline = buckets.map((value, index) => `${index / 95 * 196},${67 - value / maxAmplitude * 60}`).join(" ");
+  const span = Math.max(1e-9, endHz - startHz);
+  return <svg className="data-chart spectrum-chart" viewBox="0 0 196 72" preserveAspectRatio="none">
+    <line x1="0" y1="67" x2="196" y2="67"/>
+    {band.length > 0 && <polyline points={polyline}/>} 
+    {peaks.slice(0, 20).map((point, index) => <g key={`${point.f}-${index}`}><line className="peak-marker" x1={(point.f-startHz)/span*196} y1="8" x2={(point.f-startHz)/span*196} y2="67"/><circle className="peak-dot" cx={(point.f-startHz)/span*196} cy={67-point.a/maxAmplitude*60} r="2.3"/></g>)}
+  </svg>;
+}
+
 function TinyWave({ samples }: { samples: number[] }) {
   const values = samples.length ? Array.from({ length: 44 }, (_, i) => samples[Math.floor(i / 43 * (samples.length - 1))]) : [];
   const max = Math.max(1e-8, ...values.map(Math.abs));
@@ -170,15 +255,21 @@ export default function Home() {
     const band = spectrum.filter((point) => Math.abs(point.f - bpfo) <= Math.max(2 * resolution, 1));
     return { rms, peak, kurtosis: squareMean ? fourth / squareMean ** 2 : 0, crest: rms ? peak / rms : 0, bpfo: Math.max(0, ...band.map((point) => point.a)) };
   }, [samples, spectrum, fs, bpfo]);
+  const peakSearchNodes = nodes.filter((node) => node.type === "peakSearch");
+  const peakSearchKey = peakSearchNodes.map((node) => [node.id, node.searchMode, node.searchMinHz, node.searchMaxHz, node.energyRatio, node.harmonicCount, node.toleranceHz].join(":" )).join("|");
+  const peakResultsById = useMemo(() => new Map(peakSearchNodes.map((node) => [node.id, searchSpectrumPeaks(spectrum, node, bpfo)])), [spectrum, bpfo, peakSearchKey]);
 
   function connectNodes(source: string, target: string) {
     const sourceNode = nodes.find((node) => node.id === source);
     const targetNode = nodes.find((node) => node.id === target);
     if (!sourceNode || !targetNode || source === target) return;
-    if (sourceNode.type === "report") { notify("报告导出是终端节点，不能继续向后连线"); return; }
+    if (sourceNode.type === "report" || sourceNode.type === "display") { notify(`${sourceNode.title}是终端节点，不能继续向后连线`); return; }
     if (targetNode.type === "report" && sourceNode.type !== "output") { notify("报告导出只能连接在诊断结果后面"); return; }
+    if (targetNode.type === "peakSearch" && !(sourceNode.type === "feature" && sourceNode.title.includes("FFT"))) { notify("峰值搜索的输入必须连接 FFT 频谱节点"); return; }
+    if (targetNode.type === "display" && !["source", "feature", "peakSearch"].includes(sourceNode.type)) { notify("数据显示只接收波形、频谱或计算数据"); return; }
     setConnections((current) => {
-      const base = targetNode.type === "report" ? current.filter((edge) => edge.target !== target) : current;
+      const singleInput = targetNode.type === "report" || targetNode.type === "peakSearch" || targetNode.type === "display";
+      const base = singleInput ? current.filter((edge) => edge.target !== target) : current;
       return base.some((edge) => edge.source === source && edge.target === target) ? base : [...base, { id: `edge-${Date.now()}`, source, target }];
     });
     setDiagnosis(null);
@@ -334,7 +425,10 @@ export default function Home() {
     if (!canvasViewportRef.current) return;
     const point = screenToCanvas(event.clientX, event.clientY);
     const id = `node-${Date.now()}`;
-    setNodes((current) => [...current, { id, type: item.type, title: item.title, metric: item.metric, logic: item.logic, operator: ">", threshold: item.metric === "kurtosis" ? 3.5 : .2, x: point.x - NODE_WIDTH / 2, y: point.y - PORT_Y }]);
+    const specialDefaults: Partial<FlowNode> = item.type === "peakSearch"
+      ? { searchMode: "energy", searchMinHz: 0, searchMaxHz: Math.min(1000, fs / 2), energyRatio: 80, harmonicCount: 3, toleranceHz: 3 }
+      : item.type === "display" ? { displayMode: "auto" } : {};
+    setNodes((current) => [...current, { id, type: item.type, title: item.title, metric: item.metric, logic: item.logic, operator: ">", threshold: item.metric === "kurtosis" ? 3.5 : .2, x: point.x - NODE_WIDTH / 2, y: point.y - PORT_Y, ...specialDefaults }]);
     setSelected(id); setDiagnosis(null);
   }
 
@@ -507,12 +601,35 @@ export default function Home() {
             </svg>
             {nodes.map((node) => <article key={node.id} className={`flow-node ${node.type} ${selected===node.id?"selected":""}`} style={{left:node.x,top:node.y}} onPointerDown={(event)=>startNodeDrag(event,node.id)} onClick={(event)=>{event.stopPropagation();setSelected(node.id);}}>
               <button className="input-port port" data-input-node={node.id} aria-label={`连接到${node.title}`} onPointerUp={(event)=>finishConnection(event,node.id)}/>
-              {node.type !== "report" && <button className="output-port port" aria-label={`从${node.title}开始连线`} onPointerDown={(event)=>startConnection(event,node.id)}/>}
-              <header><span className="node-type-icon">{node.type==="source"?"∿":node.type==="feature"?"ƒ":node.type==="condition"?"?":node.type==="logic"?(node.logic==="AND"?"&":"≥1"):node.type==="report"?"W":"!"}</span><div><small>{node.type==="source"?"数据输入":node.type==="feature"?"信号处理":node.type==="condition"?"条件判断":node.type==="logic"?"逻辑组合":node.type==="report"?"报告输出":"诊断输出"}</small><strong>{node.title}</strong></div><button className="node-delete" aria-label="删除节点" onClick={()=>removeNode(node.id)}>×</button></header>
+              {node.type !== "report" && node.type !== "display" && <button className="output-port port" aria-label={`从${node.title}开始连线`} onPointerDown={(event)=>startConnection(event,node.id)}/>} 
+              <header><span className="node-type-icon">{node.type==="source"?"∿":node.type==="feature"?"ƒ":node.type==="peakSearch"?"⌃":node.type==="condition"?"?":node.type==="logic"?(node.logic==="AND"?"&":"≥1"):node.type==="display"?"▥":node.type==="report"?"W":"!"}</span><div><small>{node.type==="source"?"数据输入":node.type==="feature"?"信号处理":node.type==="peakSearch"?"频谱分析":node.type==="condition"?"条件判断":node.type==="logic"?"逻辑组合":node.type==="display"?"数据显示":node.type==="report"?"报告输出":"诊断输出"}</small><strong>{node.title}</strong></div><button className="node-delete" aria-label="删除节点" onClick={()=>removeNode(node.id)}>×</button></header>
               {node.type === "source" && <div className="node-body wave-body"><TinyWave samples={samples}/><span>{samples.length?`${samples.length.toLocaleString()} 点` : "等待导入"}</span></div>}
               {node.type === "feature" && node.metric && <div className="node-body value-body"><span>{metricInfo[node.metric].label}</span><strong>{metrics[node.metric].toFixed(node.metric==="kurtosis"||node.metric==="crest"?2:3)}</strong><small>{metricInfo[node.metric].unit}</small></div>}
+              {node.type === "peakSearch" && (() => {
+                const linked = connections.some((edge) => edge.target === node.id);
+                const result = linked ? peakResultsById.get(node.id) ?? {peaks:[],energyPercent:0,bandPointCount:0} : {peaks:[],energyPercent:0,bandPointCount:0};
+                return <div className="node-body peak-search-body">
+                  <label className="field-label">搜索频段 <span>Hz</span></label>
+                  <div className="range-fields"><input aria-label="搜索起始频率" type="number" min="0" value={node.searchMinHz ?? 0} onChange={(event)=>updateNode(node.id,{searchMinHz:Number(event.target.value)})}/><b>—</b><input aria-label="搜索结束频率" type="number" min="0" value={node.searchMaxHz ?? Math.min(1000,fs/2)} onChange={(event)=>updateNode(node.id,{searchMaxHz:Number(event.target.value)})}/></div>
+                  <label className="field-label mode-label">搜索方式<select value={node.searchMode ?? "energy"} onChange={(event)=>updateNode(node.id,{searchMode:event.target.value as SearchMode})}><option value="energy">能量占比</option><option value="harmonic">倍频搜索</option></select></label>
+                  {(node.searchMode ?? "energy") === "energy" ? <div className="energy-settings"><label>累计能量上限</label><div><input aria-label="累计能量上限" type="number" min="1" max="100" value={node.energyRatio ?? 80} onChange={(event)=>updateNode(node.id,{energyRatio:Number(event.target.value)})}/><span>%</span></div><small>峰值按幅值降序累加，不超过该占比</small></div> : <div className="harmonic-settings"><div className="theory-base"><span>理论基频</span><b>{bpfo.toFixed(2)} Hz · BPFO</b></div><div className="harmonic-fields"><label>搜索到<input aria-label="搜索倍频数" type="number" min="1" max="20" value={node.harmonicCount ?? 3} onChange={(event)=>updateNode(node.id,{harmonicCount:Number(event.target.value)})}/><span>倍频</span></label><label>左右容差<input aria-label="倍频搜索容差" type="number" min="0.1" step="0.1" value={node.toleranceHz ?? 3} onChange={(event)=>updateNode(node.id,{toleranceHz:Number(event.target.value)})}/><span>Hz</span></label></div></div>}
+                  <div className={`peak-results ${linked&&samples.length?"ready":""}`}><div><span>{!linked?"请连接 FFT 频谱":!samples.length?"等待导入数据":`${result.peaks.length} 个峰值`}</span>{linked&&samples.length&&<small>{node.searchMode==="harmonic"?"理论频率附近最大峰":"已选峰值能量 "+result.energyPercent.toFixed(1)+"%"}</small>}</div>{linked&&samples.length&&<strong>{result.peaks[0]?`${result.peaks[0].f.toFixed(2)} Hz` : "无结果"}</strong>}</div>
+                  {linked&&samples.length&&result.peaks.length>0&&<div className="peak-list">{result.peaks.slice(0,4).map((peak,index)=><span key={`${peak.f}-${index}`}><b>{peak.order?`${peak.order}×`:`#${index+1}`}</b>{peak.f.toFixed(2)} Hz<em>{peak.a.toFixed(3)}</em></span>)}</div>}
+                </div>;
+              })()}
               {node.type === "condition" && <div className="node-body condition-body"><select value={node.metric} onChange={(event)=>updateNode(node.id,{metric:event.target.value as MetricKey})}>{Object.entries(metricInfo).map(([key,info])=><option value={key} key={key}>{info.label}</option>)}</select><div><select value={node.operator} onChange={(event)=>updateNode(node.id,{operator:event.target.value as ">"|"<"})}><option value=">">大于</option><option value="<">小于</option></select><input value={node.threshold} type="number" step="0.01" onChange={(event)=>updateNode(node.id,{threshold:Number(event.target.value)})}/></div><small className={evaluateNode(node.id)?"pass":""}>当前 {node.metric?metrics[node.metric].toFixed(3):"—"} · {evaluateNode(node.id)?"满足":"未满足"}</small></div>}
               {node.type === "logic" && <div className="node-body logic-body"><div><button className={node.logic==="AND"?"active":""} onClick={()=>updateNode(node.id,{logic:"AND",title:"全部满足"})}>AND</button><button className={node.logic==="OR"?"active":""} onClick={()=>updateNode(node.id,{logic:"OR",title:"任一满足"})}>OR</button></div><small>{connections.filter((edge)=>edge.target===node.id).length} 个输入</small></div>}
+              {node.type === "display" && (() => {
+                const inputId = connections.find((edge)=>edge.target===node.id)?.source;
+                const inputNode = inputId ? nodeById.get(inputId) : undefined;
+                const automaticMode: Exclude<DisplayMode,"auto"> = inputNode?.type==="source" ? "waveform" : inputNode?.type==="peakSearch" || (inputNode?.type==="feature"&&inputNode.title.includes("FFT")) ? "spectrum" : "value";
+                const mode = node.displayMode === "auto" || !node.displayMode ? automaticMode : node.displayMode;
+                const searchResult = inputNode?.type==="peakSearch" ? peakResultsById.get(inputNode.id) : undefined;
+                const minHz = inputNode?.type==="peakSearch" ? inputNode.searchMinHz ?? 0 : 0;
+                const maxHz = inputNode?.type==="peakSearch" ? inputNode.searchMaxHz ?? fs/2 : fs/2;
+                const metric = inputNode?.metric;
+                return <div className="node-body display-body"><div className="display-controls"><select aria-label="显示数据类型" value={node.displayMode ?? "auto"} onChange={(event)=>updateNode(node.id,{displayMode:event.target.value as DisplayMode})}><option value="auto">自动识别</option><option value="waveform">波形</option><option value="spectrum">频谱</option><option value="value">数值</option></select><span>{inputNode?`来源：${inputNode.title}`:"等待连接数据"}</span></div>{inputNode&&mode==="waveform"&&<><DataWave samples={samples}/><div className="chart-axis"><span>0 s</span><b>时域波形</b><span>{(samples.length/fs).toFixed(2)} s</span></div></>}{inputNode&&mode==="spectrum"&&<><SpectrumChart spectrum={spectrum} minHz={minHz} maxHz={maxHz} peaks={searchResult?.peaks}/><div className="chart-axis"><span>{minHz.toFixed(0)} Hz</span><b>{searchResult?.peaks.length?`${searchResult.peaks.length} 个峰值已标记`:"幅值谱"}</b><span>{maxHz.toFixed(0)} Hz</span></div></>}{inputNode&&mode==="value"&&<div className="display-value"><span>{metric?metricInfo[metric].label:"数据值"}</span><strong>{metric?metrics[metric].toFixed(metric==="kurtosis"||metric==="crest"?2:3):"—"}</strong><small>{metric?metricInfo[metric].unit:"当前输入无标量值"}</small></div>}{!inputNode&&<div className="display-empty"><span>▥</span><p>连接波形、FFT 频谱或峰值搜索节点</p></div>}</div>;
+              })()}
               {node.type === "output" && <div className={`node-body output-body ${diagnosis?(diagnosis.fault?"fault":"normal"):""}`}><span>{diagnosis?(diagnosis.fault?"!":"✓"):"?"}</span><div><strong>{resultText}</strong><small>{diagnosis?`满足 ${diagnosis.matched}/${diagnosis.total} 个条件`:"点击右上角运行"}</small></div></div>}
               {node.type === "report" && (() => { const output=connectedOutputForReport(node.id); const ready=Boolean(output&&diagnosis); return <div className={`node-body report-body ${ready?"ready":""}`}><div><span>DOCX</span><small>{!output?"请连接诊断结果":diagnosis?"报告内容已就绪":"运行诊断后下载"}</small></div><button disabled={!ready} onClick={()=>downloadReport(node.id)}>↓ 下载 Word</button></div>; })()}
             </article>)}
