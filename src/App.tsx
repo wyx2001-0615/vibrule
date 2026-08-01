@@ -28,6 +28,16 @@ type CanvasView = { x: number; y: number; scale: number };
 type SelectionBox = { left: number; top: number; width: number; height: number };
 type PeakResult = SpectrumPoint & { order?: number; theoretical?: number };
 type PeakSearchResult = { peaks: PeakResult[]; energyPercent: number; bandPointCount: number };
+type SourceSignal = { fileName: string; samples: number[]; revision: number };
+type MetricSet = Record<MetricKey, number>;
+type RunResults = {
+  sourceIdByNode: Map<string, string>;
+  metricsBySource: Map<string, MetricSet>;
+  spectrumByNode: Map<string, SpectrumPoint[]>;
+  valueByNode: Map<string, number>;
+  peakResultsByNode: Map<string, PeakSearchResult>;
+  nodePass: Map<string, boolean>;
+};
 
 const NODE_WIDTH = 220;
 const PORT_Y = 49;
@@ -142,6 +152,19 @@ function generateDemo(fs: number, rpm: number, bpfo: number) {
     const impact = local < .006 ? 1.25 * Math.exp(-520 * local) * Math.sin(2 * Math.PI * 1800 * local) : 0;
     return impact + .045 * Math.sin(2 * Math.PI * rpm / 60 * time) + .12 * Math.sin(2 * Math.PI * bpfo * time) + .014 * Math.sin(index * 1.731);
   });
+}
+
+function calculateMetricsForSignal(samples: number[], spectrum: SpectrumPoint[], fs: number, bpfo: number): MetricSet {
+  if (!samples.length) return { rms: 0, peak: 0, kurtosis: 0, crest: 0, bpfo: 0 };
+  const mean = samples.reduce((sum, value) => sum + value, 0) / samples.length;
+  const centered = samples.map((value) => value - mean);
+  const squareMean = centered.reduce((sum, value) => sum + value * value, 0) / centered.length;
+  const rms = Math.sqrt(squareMean);
+  const peak = Math.max(...centered.map(Math.abs));
+  const fourth = centered.reduce((sum, value) => sum + value ** 4, 0) / centered.length;
+  const resolution = fs / Math.max(2, spectrum.length * 2);
+  const band = spectrum.filter((point) => Math.abs(point.f - bpfo) <= Math.max(2 * resolution, 1));
+  return { rms, peak, kurtosis: squareMean ? fourth / squareMean ** 2 : 0, crest: rms ? peak / rms : 0, bpfo: Math.max(0, ...band.map((point) => point.a)) };
 }
 
 function searchSpectrumPeaks(points: SpectrumPoint[], node: FlowNode, baseFrequency: number): PeakSearchResult {
@@ -283,13 +306,13 @@ function TinyWave({ samples }: { samples: number[] }) {
 export default function Home() {
   const [nodes, setNodes] = useState<FlowNode[]>(starterNodes);
   const [connections, setConnections] = useState<Connection[]>(starterConnections);
-  const [samples, setSamples] = useState<number[]>([]);
-  const [fileName, setFileName] = useState("未导入数据");
+  const [sourceSignals, setSourceSignals] = useState<Record<string, SourceSignal>>({});
   const [fs, setFs] = useState(12800);
   const [rpm, setRpm] = useState(1485);
   const [bpfo, setBpfo] = useState(148.2);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [diagnosis, setDiagnosis] = useState<{ fault: boolean; matched: number; total: number } | null>(null);
+  const [runResults, setRunResults] = useState<RunResults | null>(null);
   const [toast, setToast] = useState("");
   const [draftLink, setDraftLink] = useState<{ source: string; x: number; y: number } | null>(null);
   const [canvasView, setCanvasViewState] = useState<CanvasView>(INITIAL_VIEW);
@@ -303,34 +326,31 @@ export default function Home() {
   const selectionRef = useRef<{ startX: number; startY: number; currentX: number; currentY: number } | null>(null);
   const viewRef = useRef<CanvasView>(INITIAL_VIEW);
 
-  const spectrum = useMemo(() => samples.length >= 64 ? calculateSpectrum(samples, fs) : [], [samples, fs]);
-  const metrics = useMemo(() => {
-    if (!samples.length) return { rms: 0, peak: 0, kurtosis: 0, crest: 0, bpfo: 0 };
-    const mean = samples.reduce((sum, value) => sum + value, 0) / samples.length;
-    const centered = samples.map((value) => value - mean);
-    const squareMean = centered.reduce((sum, value) => sum + value * value, 0) / centered.length;
-    const rms = Math.sqrt(squareMean);
-    const peak = Math.max(...centered.map(Math.abs));
-    const fourth = centered.reduce((sum, value) => sum + value ** 4, 0) / centered.length;
-    const resolution = fs / Math.max(2, spectrum.length * 2);
-    const band = spectrum.filter((point) => Math.abs(point.f - bpfo) <= Math.max(2 * resolution, 1));
-    return { rms, peak, kurtosis: squareMean ? fourth / squareMean ** 2 : 0, crest: rms ? peak / rms : 0, bpfo: Math.max(0, ...band.map((point) => point.a)) };
-  }, [samples, spectrum, fs, bpfo]);
-  const signalRange = useMemo(() => samples.length ? samples.reduce((range, value) => ({ min: Math.min(range.min, value), max: Math.max(range.max, value) }), { min: samples[0], max: samples[0] }) : { min: 0, max: 0 }, [samples]);
-  const peakSearchNodes = nodes.filter((node) => node.type === "peakSearch");
-  const peakSearchKey = peakSearchNodes.map((node) => [node.id, node.searchMode, node.searchMinHz, node.searchMaxHz, node.energyRatio, node.harmonicCount, node.toleranceHz].join(":" )).join("|");
-  const peakResultsById = useMemo(() => new Map(peakSearchNodes.map((node) => [node.id, searchSpectrumPeaks(spectrum, node, bpfo)])), [spectrum, bpfo, peakSearchKey]);
+  const loadedSourceNodes = nodes.filter((node) => node.type === "source" && sourceSignals[node.id]?.samples.length);
+  const loadedPointCount = loadedSourceNodes.reduce((sum, node) => sum + sourceSignals[node.id].samples.length, 0);
+  const calculationKey = useMemo(() => JSON.stringify({
+    fs, rpm, bpfo,
+    nodes: nodes.map(({id,type,metric,operator,threshold,logic,searchMode,searchMinHz,searchMaxHz,energyRatio,harmonicCount,toleranceHz}) => ({id,type,metric,operator,threshold,logic,searchMode,searchMinHz,searchMaxHz,energyRatio,harmonicCount,toleranceHz})),
+    connections: connections.map(({source,target}) => ({source,target})),
+    signals: Object.entries(sourceSignals).map(([id, signal]) => [id, signal.revision]),
+  }), [nodes, connections, sourceSignals, fs, rpm, bpfo]);
+
+  useEffect(() => {
+    setRunResults(null);
+    setDiagnosis(null);
+  }, [calculationKey]);
 
   function connectNodes(source: string, target: string) {
     const sourceNode = nodes.find((node) => node.id === source);
     const targetNode = nodes.find((node) => node.id === target);
     if (!sourceNode || !targetNode || source === target) return;
     if (sourceNode.type === "report" || sourceNode.type === "display") { notify(`${sourceNode.title}是终端节点，不能继续向后连线`); return; }
+    if (targetNode.type === "source") { notify("振动波形是数据起点，不能接收上游连线"); return; }
     if (targetNode.type === "report" && sourceNode.type !== "output") { notify("报告导出只能连接在诊断结果后面"); return; }
     if (targetNode.type === "peakSearch" && !(sourceNode.type === "feature" && sourceNode.title.includes("FFT"))) { notify("峰值搜索的输入必须连接 FFT 频谱节点"); return; }
     if (targetNode.type === "display" && !["source", "feature", "peakSearch"].includes(sourceNode.type)) { notify("数据显示只接收波形、频谱或计算数据"); return; }
     setConnections((current) => {
-      const singleInput = targetNode.type === "report" || targetNode.type === "peakSearch" || targetNode.type === "display";
+      const singleInput = ["feature", "condition", "peakSearch", "display", "report"].includes(targetNode.type);
       const base = singleInput ? current.filter((edge) => edge.target !== target) : current;
       return base.some((edge) => edge.source === source && edge.target === target) ? base : [...base, { id: `edge-${Date.now()}`, source, target }];
     });
@@ -459,6 +479,7 @@ export default function Home() {
       const ids = new Set(selectedIds);
       setNodes((current) => current.filter((node) => !ids.has(node.id)));
       setConnections((current) => current.filter((edge) => !ids.has(edge.source) && !ids.has(edge.target)));
+      setSourceSignals((current) => Object.fromEntries(Object.entries(current).filter(([id]) => !ids.has(id))));
       setSelectedIds([]);
       setDiagnosis(null);
       notify(`已删除 ${ids.size} 个节点`);
@@ -472,24 +493,27 @@ export default function Home() {
     window.setTimeout(() => setToast(""), 2300);
   }
 
-  async function loadFile(file?: File) {
+  async function loadFile(sourceId: string, file?: File) {
     if (!file) return;
     try {
       const values = parseTextSignal(await file.text()).slice(0, 65536);
       if (values.length < 64) throw new Error("too short");
-      setSamples(values); setFileName(file.name); setDiagnosis(null);
-      notify(`已读取 ${values.length.toLocaleString()} 个数据点`);
+      setSourceSignals((current) => ({ ...current, [sourceId]: { fileName: file.name, samples: values, revision: Date.now() } }));
+      setDiagnosis(null); setRunResults(null);
+      notify(`${file.name}：已读取 ${values.length.toLocaleString()} 个数据点`);
     } catch { notify("无法识别文件，请使用单列或“时间,幅值”格式"); }
   }
 
-  function loadDemo() {
-    setSamples(generateDemo(fs, rpm, bpfo)); setFileName("轴承外圈故障演示.txt"); setDiagnosis(null); notify("演示波形已载入");
+  function loadDemo(sourceId: string) {
+    const samples = generateDemo(fs, rpm, bpfo);
+    setSourceSignals((current) => ({ ...current, [sourceId]: { fileName: `轴承外圈故障演示-${sourceId.slice(-4)}.txt`, samples, revision: Date.now() } }));
+    setDiagnosis(null); setRunResults(null); notify("演示波形已载入当前节点");
   }
 
   function startNodeDrag(event: React.PointerEvent, id: string) {
     if (event.button !== 0) return;
     const target = event.target as HTMLElement;
-    if (target.closest("button,input,select,.port,.chart-preview")) return;
+    if (target.closest("button,input,label,select,.port,.chart-preview")) return;
     const node = nodes.find((item) => item.id === id);
     if (!node) return;
     const point = screenToCanvas(event.clientX, event.clientY);
@@ -556,33 +580,24 @@ export default function Home() {
     setNodes((current) => current.filter((node) => node.id !== id));
     setConnections((current) => current.filter((edge) => edge.source !== id && edge.target !== id));
     setSelectedIds((current) => current.filter((selectedId) => selectedId !== id)); setDiagnosis(null);
+    setSourceSignals((current) => Object.fromEntries(Object.entries(current).filter(([sourceId]) => sourceId !== id)));
     setPreviewNodeId((current) => current === id ? null : current);
   }
 
   function clearCanvas() {
     setNodes([]);
     setConnections([]);
+    setSourceSignals({});
     setSelectedIds([]);
     setDraftLink(null);
     setDiagnosis(null);
+    setRunResults(null);
     setPreviewNodeId(null);
-    notify("画布已清空，导入的数据仍然保留");
+    notify("画布与节点波形已清空");
   }
 
-  function evaluateNode(id: string, visiting = new Set<string>()): boolean {
-    if (visiting.has(id)) return false;
-    const nextVisiting = new Set(visiting).add(id);
-    const node = nodes.find((item) => item.id === id);
-    if (!node) return false;
-    const incoming = connections.filter((edge) => edge.target === id).map((edge) => edge.source);
-    if (node.type === "condition" && node.metric && node.operator && node.threshold !== undefined) return node.operator === ">" ? metrics[node.metric] > node.threshold : metrics[node.metric] < node.threshold;
-    if (node.type === "logic") {
-      if (!incoming.length) return false;
-      const values = incoming.map((source) => evaluateNode(source, nextVisiting));
-      return node.logic === "OR" ? values.some(Boolean) : values.every(Boolean);
-    }
-    if (node.type === "output") return incoming.length > 0 && incoming.every((source) => evaluateNode(source, nextVisiting));
-    return true;
+  function evaluateNode(id: string): boolean {
+    return runResults?.nodePass.get(id) ?? false;
   }
 
   function conditionIdsUpstream(id: string, visited = new Set<string>()): string[] {
@@ -594,6 +609,21 @@ export default function Home() {
     return connections.filter((edge) => edge.target === id).flatMap((edge) => conditionIdsUpstream(edge.source, visited));
   }
 
+  function sourceIdsUpstream(id: string, visited = new Set<string>()): string[] {
+    if (visited.has(id)) return [];
+    visited.add(id);
+    const node = nodes.find((item) => item.id === id);
+    if (!node) return [];
+    if (node.type === "source") return sourceSignals[id]?.samples.length ? [id] : [];
+    return connections.filter((edge) => edge.target === id).flatMap((edge) => sourceIdsUpstream(edge.source, visited));
+  }
+
+  function nodeIdsUpstream(id: string, visited = new Set<string>()): string[] {
+    if (visited.has(id)) return [];
+    visited.add(id);
+    return [id, ...connections.filter((edge) => edge.target === id).flatMap((edge) => nodeIdsUpstream(edge.source, visited))];
+  }
+
   function connectedOutputForReport(reportId: string) {
     const outputId = connections.find((edge) => edge.target === reportId)?.source;
     return nodes.find((node) => node.id === outputId && node.type === "output");
@@ -602,7 +632,7 @@ export default function Home() {
   async function downloadReport(reportId: string) {
     const output = connectedOutputForReport(reportId);
     if (!output) { notify("请先把报告导出连接到诊断结果节点"); return; }
-    if (!diagnosis) { notify("请先运行诊断，再导出报告"); return; }
+    if (!diagnosis || !runResults) { notify("请先运行诊断，再导出报告"); return; }
 
     const conditionIds = [...new Set(conditionIdsUpstream(output.id))];
     const conditions = conditionIds.map((id) => nodes.find((node) => node.id === id)).filter((node): node is FlowNode => Boolean(node));
@@ -612,10 +642,17 @@ export default function Home() {
     const generatedAt = new Date();
     const generatedText = generatedAt.toLocaleString("zh-CN", { hour12: false });
     const { AlignmentType, Document, HeadingLevel, Packer, Paragraph, Table, TableCell, TableRow, TextRun, WidthType } = await import("docx");
-    const metricRows = (Object.keys(metricInfo) as MetricKey[]).map((key) => [metricInfo[key].label, metrics[key].toFixed(key === "kurtosis" || key === "crest" ? 2 : 3), metricInfo[key].unit]);
+    const relevantNodeIds = new Set(nodeIdsUpstream(output.id));
+    const reportSourceIds = [...new Set(sourceIdsUpstream(output.id))];
+    const reportSignals = reportSourceIds.map((id) => ({ id, signal: sourceSignals[id] })).filter((item): item is {id:string;signal:SourceSignal} => Boolean(item.signal));
+    const metricRows = nodes.filter((node) => relevantNodeIds.has(node.id) && node.type === "feature" && node.metric && runResults.valueByNode.has(node.id)).map((node) => {
+      const key = node.metric!;
+      const sourceId = runResults.sourceIdByNode.get(node.id);
+      return [`${node.title}${sourceId ? `（${sourceSignals[sourceId]?.fileName ?? sourceId}）` : ""}`, runResults.valueByNode.get(node.id)!.toFixed(key === "kurtosis" || key === "crest" ? 2 : 3), metricInfo[key].unit];
+    });
     const conditionRows = conditions.map((node) => {
       const key = node.metric ?? "rms";
-      return [node.title, metricInfo[key].label, metrics[key].toFixed(3), `${node.operator === ">" ? "大于" : "小于"} ${node.threshold ?? 0}`, evaluateNode(node.id) ? "满足" : "未满足"];
+      return [node.title, metricInfo[key].label, (runResults.valueByNode.get(node.id) ?? 0).toFixed(3), `${node.operator === ">" ? "大于" : "小于"} ${node.threshold ?? 0}`, evaluateNode(node.id) ? "满足" : "未满足"];
     });
     const makeCell = (text: string, bold = false) => new TableCell({ children: [new Paragraph({ children: [new TextRun({ text, bold, font: "Microsoft YaHei" })] })] });
     const makeTable = (rows: string[][]) => new Table({
@@ -630,28 +667,27 @@ export default function Home() {
       new Paragraph({ text: "一、数据与设备参数", heading: HeadingLevel.HEADING_1 }),
       makeTable([
         ["项目", "内容"],
-        ["数据文件", fileName],
-        ["采样点数", samples.length.toLocaleString()],
+        ...reportSignals.flatMap((item, index) => [[`数据文件 ${index + 1}`, item.signal.fileName], [`采样点数 ${index + 1}`, item.signal.samples.length.toLocaleString()]]),
         ["采样频率", `${fs} Hz`],
         ["设备转速", `${rpm} rpm`],
         ["轴承外圈故障频率 BPFO", `${bpfo} Hz`],
         ["报告生成时间", generatedText],
       ]),
       new Paragraph({ text: "二、特征指标", heading: HeadingLevel.HEADING_1 }),
-      makeTable([["指标", "计算值", "单位"], ...metricRows]),
+      makeTable([["指标节点（数据源）", "计算值", "单位"], ...(metricRows.length ? metricRows : [["无已计算特征", "—", "—"]])]),
       new Paragraph({ text: "三、诊断规则明细", heading: HeadingLevel.HEADING_1 }),
       makeTable([["条件节点", "指标", "当前值", "判断规则", "结果"], ...conditionRows]),
       new Paragraph({ text: "四、诊断结论", heading: HeadingLevel.HEADING_1 }),
       new Paragraph({ children: [new TextRun({ text: conclusion, bold: true, font: "Microsoft YaHei" })] }),
       new Paragraph({ text: fault ? "当前信号同时满足所连接的故障判据，建议结合设备工况、包络谱及现场检查进一步确认轴承外圈状态。" : "当前信号未同时满足所连接的故障判据，建议持续监测趋势，并结合设备工况复核阈值设置。" }),
-      new Paragraph({ text: "说明：本报告由 VibRule 低代码振动诊断平台依据当前画布连线、参数和导入信号自动生成。", spacing: { before: 320 } }),
+      new Paragraph({ text: "说明：本报告由 VibRule 低代码振动诊断平台依据当前画布连线、各波形节点数据和运行时参数自动生成。", spacing: { before: 320 } }),
     ] }] });
 
     try {
       const blob = await Packer.toBlob(report);
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
-      const baseName = fileName.replace(/\.[^.]+$/, "").replace(/[\\/:*?"<>|]/g, "_").slice(0, 60) || "振动信号";
+      const baseName = (reportSignals[0]?.signal.fileName ?? "多波形诊断").replace(/\.[^.]+$/, "").replace(/[\\/:*?"<>|]/g, "_").slice(0, 60) || "振动信号";
       const stamp = generatedAt.toISOString().replace(/[-:]/g, "").slice(0, 15).replace("T", "_");
       link.href = url; link.download = `VibRule_${baseName}_${stamp}.docx`;
       document.body.appendChild(link); link.click(); link.remove();
@@ -663,13 +699,98 @@ export default function Home() {
   }
 
   function runDiagnosis() {
-    if (!samples.length) { notify("请先导入波形或载入演示数据"); return; }
+    if (!loadedSourceNodes.length) { notify("请在振动波形节点中导入波形或载入演示数据"); return; }
     const outputs = nodes.filter((node) => node.type === "output");
-    if (!outputs.length) { notify("画布中需要至少一个诊断输出节点"); return; }
     const conditionIds = [...new Set(outputs.flatMap((node) => conditionIdsUpstream(node.id)))];
-    if (!conditionIds.length) { notify("请将条件节点连接到诊断输出"); return; }
-    const matched = conditionIds.filter((id) => evaluateNode(id)).length;
-    setDiagnosis({ fault: outputs.some((node) => evaluateNode(node.id)), matched, total: conditionIds.length });
+
+    const sourceIdByNode = new Map<string, string>();
+    const metricsBySource = new Map<string, MetricSet>();
+    const spectrumBySource = new Map<string, SpectrumPoint[]>();
+    const spectrumByNode = new Map<string, SpectrumPoint[]>();
+    const valueByNode = new Map<string, number>();
+    const peakResultsByNode = new Map<string, PeakSearchResult>();
+    const nodePass = new Map<string, boolean>();
+    const nodeMap = new Map(nodes.map((node) => [node.id, node]));
+
+    const resolveSource = (nodeId: string, visiting = new Set<string>()): string | undefined => {
+      const cached = sourceIdByNode.get(nodeId);
+      if (cached) return cached;
+      if (visiting.has(nodeId)) return undefined;
+      const node = nodeMap.get(nodeId);
+      if (!node) return undefined;
+      if (node.type === "source") {
+        if (!sourceSignals[nodeId]?.samples.length) return undefined;
+        sourceIdByNode.set(nodeId, nodeId);
+        return nodeId;
+      }
+      const next = new Set(visiting).add(nodeId);
+      for (const edge of connections.filter((item) => item.target === nodeId)) {
+        const sourceId = resolveSource(edge.source, next);
+        if (sourceId) { sourceIdByNode.set(nodeId, sourceId); return sourceId; }
+      }
+      return undefined;
+    };
+    const getSpectrum = (sourceId: string) => {
+      if (!spectrumBySource.has(sourceId)) {
+        const samples = sourceSignals[sourceId]?.samples ?? [];
+        spectrumBySource.set(sourceId, samples.length >= 64 ? calculateSpectrum(samples, fs) : []);
+      }
+      return spectrumBySource.get(sourceId) ?? [];
+    };
+    const getMetrics = (sourceId: string) => {
+      if (!metricsBySource.has(sourceId)) metricsBySource.set(sourceId, calculateMetricsForSignal(sourceSignals[sourceId]?.samples ?? [], getSpectrum(sourceId), fs, bpfo));
+      return metricsBySource.get(sourceId)!;
+    };
+
+    nodes.forEach((node) => {
+      const sourceId = resolveSource(node.id);
+      if (!sourceId) return;
+      if (node.type === "feature" && node.metric) {
+        const spectrum = getSpectrum(sourceId);
+        if (node.title.includes("FFT")) spectrumByNode.set(node.id, spectrum);
+        valueByNode.set(node.id, getMetrics(sourceId)[node.metric]);
+      }
+      if (node.type === "peakSearch") {
+        const spectrum = getSpectrum(sourceId);
+        spectrumByNode.set(node.id, spectrum);
+        peakResultsByNode.set(node.id, searchSpectrumPeaks(spectrum, node, bpfo));
+      }
+      if (node.type === "display") {
+        const inputId = connections.find((edge) => edge.target === node.id)?.source;
+        const inputNode = inputId ? nodeMap.get(inputId) : undefined;
+        if (inputId && inferDisplayMode(node, inputNode) === "spectrum") spectrumByNode.set(inputId, getSpectrum(sourceId));
+      }
+      if (node.type === "condition" && node.metric && node.operator && node.threshold !== undefined) {
+        const value = getMetrics(sourceId)[node.metric];
+        valueByNode.set(node.id, value);
+        nodePass.set(node.id, node.operator === ">" ? value > node.threshold : value < node.threshold);
+      }
+    });
+
+    const evaluate = (id: string, visiting = new Set<string>()): boolean => {
+      if (nodePass.has(id)) return nodePass.get(id)!;
+      if (visiting.has(id)) return false;
+      const node = nodeMap.get(id);
+      if (!node) return false;
+      const incoming = connections.filter((edge) => edge.target === id).map((edge) => edge.source);
+      const next = new Set(visiting).add(id);
+      let pass = Boolean(resolveSource(id));
+      if (node.type === "logic") pass = incoming.length > 0 && (node.logic === "OR" ? incoming.some((source) => evaluate(source, next)) : incoming.every((source) => evaluate(source, next)));
+      if (node.type === "output") pass = incoming.length > 0 && incoming.every((source) => evaluate(source, next));
+      nodePass.set(id, pass);
+      return pass;
+    };
+    outputs.forEach((node) => evaluate(node.id));
+    setRunResults({ sourceIdByNode, metricsBySource, spectrumByNode, valueByNode, peakResultsByNode, nodePass });
+    const canDiagnose = outputs.length > 0 && conditionIds.length > 0 && conditionIds.some((id) => resolveSource(id));
+    if (canDiagnose) {
+      const matched = conditionIds.filter((id) => evaluate(id)).length;
+      setDiagnosis({ fault: outputs.some((node) => evaluate(node.id)), matched, total: conditionIds.length });
+      notify(`诊断完成，已计算 ${metricsBySource.size} 个波形数据流`);
+    } else {
+      setDiagnosis(null);
+      notify(metricsBySource.size || spectrumByNode.size ? "数据流计算完成；连接条件和诊断结果后可生成结论" : "未发现连接到计算控件的有效波形");
+    }
   }
 
   const nodeById = new Map(nodes.map((node) => [node.id, node]));
@@ -680,19 +801,26 @@ export default function Home() {
   const previewInputId = previewNode ? connections.find((edge) => edge.target === previewNode.id)?.source : undefined;
   const previewInputNode = previewInputId ? nodeById.get(previewInputId) : undefined;
   const previewMode = previewNode ? inferDisplayMode(previewNode, previewInputNode) : "waveform";
-  const previewSearchResult = previewInputNode?.type === "peakSearch" ? peakResultsById.get(previewInputNode.id) : undefined;
+  const previewSourceId = previewInputNode ? (previewInputNode.type === "source" ? previewInputNode.id : runResults?.sourceIdByNode.get(previewInputNode.id)) : undefined;
+  const previewSignal = previewSourceId ? sourceSignals[previewSourceId] : undefined;
+  const previewSamples = previewSignal?.samples ?? [];
+  const previewMetrics = previewSourceId ? runResults?.metricsBySource.get(previewSourceId) : undefined;
+  const previewSpectrum = previewInputNode ? runResults?.spectrumByNode.get(previewInputNode.id) ?? [] : [];
+  const previewValue = previewInputNode ? runResults?.valueByNode.get(previewInputNode.id) : undefined;
+  const previewSearchResult = previewInputNode?.type === "peakSearch" ? runResults?.peakResultsByNode.get(previewInputNode.id) : undefined;
   const previewMinHz = previewInputNode?.type === "peakSearch" ? previewInputNode.searchMinHz ?? 0 : 0;
   const previewMaxHz = previewInputNode?.type === "peakSearch" ? previewInputNode.searchMaxHz ?? fs / 2 : fs / 2;
-  const previewSpectrumBand = spectrum.filter((point) => point.f >= Math.min(previewMinHz, previewMaxHz) && point.f <= Math.max(previewMinHz, previewMaxHz));
+  const previewSpectrumBand = previewSpectrum.filter((point) => point.f >= Math.min(previewMinHz, previewMaxHz) && point.f <= Math.max(previewMinHz, previewMaxHz));
   const previewSpectrumMax = previewSpectrumBand.reduce((best, point) => point.a > best.a ? point : best, { f: 0, a: 0 });
-  const spectrumResolution = spectrum.length > 1 ? spectrum[1].f - spectrum[0].f : 0;
+  const spectrumResolution = previewSpectrum.length > 1 ? previewSpectrum[1].f - previewSpectrum[0].f : 0;
+  const previewSignalRange = previewSamples.length ? previewSamples.reduce((range, value) => ({ min: Math.min(range.min, value), max: Math.max(range.max, value) }), { min: previewSamples[0], max: previewSamples[0] }) : { min: 0, max: 0 };
 
   return <main className="flow-app">
     <header className="flow-header">
       <div className="flow-brand"><span>∿</span><div><strong>VibRule</strong><small>工业振动规则诊断平台</small></div></div>
       <div className="flow-actions">
-        <span className="data-state"><i className={samples.length ? "ready" : ""}/>{samples.length ? `${fileName} · ${samples.length.toLocaleString()} 点` : "尚未导入波形"}</span>
-        <button className="ghost-button" onClick={() => {setNodes(starterNodes);setConnections(starterConnections);setSelectedIds([]);setDiagnosis(null);setPreviewNodeId(null);setCanvasView(INITIAL_VIEW);}}>恢复示例</button>
+        <span className="data-state"><i className={loadedSourceNodes.length ? "ready" : ""}/>{loadedSourceNodes.length ? `${loadedSourceNodes.length} 个波形节点 · 共 ${loadedPointCount.toLocaleString()} 点` : "请在波形节点中导入数据"}</span>
+        <button className="ghost-button" onClick={() => {setNodes(starterNodes);setConnections(starterConnections);setSelectedIds([]);setDiagnosis(null);setRunResults(null);setPreviewNodeId(null);setCanvasView(INITIAL_VIEW);}}>恢复示例</button>
         <button className="ghost-button" onClick={() => {setConnections([]);setDiagnosis(null);}}>清空连线</button>
         <button className="ghost-button clear-canvas-button" onClick={clearCanvas}>清空画布</button>
         <button className="run-button" onClick={runDiagnosis}>▶ 运行诊断</button>
@@ -702,10 +830,7 @@ export default function Home() {
     <div className="flow-body">
       <aside className="node-palette">
         <div className="palette-head"><h1>节点工具箱</h1><p>拖到右侧画布中使用</p></div>
-        <div className="import-area">
-          <label><input type="file" accept=".txt,.csv" onChange={(event) => loadFile(event.target.files?.[0])}/><span>＋</span><div><strong>导入振动波形</strong><small>TXT / CSV</small></div></label>
-          <button onClick={loadDemo}>使用演示波形</button>
-        </div>
+        <div className="source-import-tip"><span>1</span><div><strong>先拖入“振动波形”</strong><small>每个波形节点可独立导入一个 TXT / CSV 文件</small></div></div>
         <div className="quick-params"><label>采样频率<input value={fs} type="number" onChange={(event) => {setFs(Number(event.target.value)||1);setDiagnosis(null);}}/><em>Hz</em></label><label>设备转速<input value={rpm} type="number" onChange={(event) => setRpm(Number(event.target.value)||0)}/><em>rpm</em></label><label>BPFO<input value={bpfo} type="number" step="0.1" onChange={(event) => {setBpfo(Number(event.target.value)||0);setDiagnosis(null);}}/><em>Hz</em></label></div>
         <div className="palette-scroll">{palette.map((group) => <section key={group.group}><h2>{group.group}</h2>{group.items.map((item) => <div className="palette-node" key={`${item.type}-${item.title}`} draggable onDragStart={(event) => {event.dataTransfer.effectAllowed="copy";event.dataTransfer.setData("application/x-vibrule-node",JSON.stringify(item));}}><span>{item.icon}</span><div><strong>{item.title}</strong><small>{item.desc}</small></div><b>⠿</b></div>)}</section>)}</div>
       </aside>
@@ -741,36 +866,43 @@ export default function Home() {
               <button className="input-port port" data-input-node={node.id} aria-label={`连接到${node.title}`} onPointerUp={(event)=>finishConnection(event,node.id)}/>
               {node.type !== "report" && node.type !== "display" && <button className="output-port port" aria-label={`从${node.title}开始连线`} onPointerDown={(event)=>startConnection(event,node.id)}/>} 
               <header><span className="node-type-icon">{node.type==="source"?"∿":node.type==="feature"?"ƒ":node.type==="peakSearch"?"⌃":node.type==="condition"?"?":node.type==="logic"?(node.logic==="AND"?"&":"≥1"):node.type==="display"?"▥":node.type==="report"?"W":"!"}</span><div><small>{node.type==="source"?"数据输入":node.type==="feature"?"信号处理":node.type==="peakSearch"?"频谱分析":node.type==="condition"?"条件判断":node.type==="logic"?"逻辑组合":node.type==="display"?"数据显示":node.type==="report"?"报告输出":"诊断输出"}</small><strong>{node.title}</strong></div><button className="node-delete" aria-label="删除节点" onClick={()=>removeNode(node.id)}>×</button></header>
-              {node.type === "source" && <div className="node-body wave-body"><TinyWave samples={samples}/><span>{samples.length?`${samples.length.toLocaleString()} 点` : "等待导入"}</span></div>}
-              {node.type === "feature" && node.metric && <div className="node-body value-body"><span>{metricInfo[node.metric].label}</span><strong>{metrics[node.metric].toFixed(node.metric==="kurtosis"||node.metric==="crest"?2:3)}</strong><small>{metricInfo[node.metric].unit}</small></div>}
+              {node.type === "source" && (()=>{const signal=sourceSignals[node.id];const calculated=Boolean(runResults&&(runResults.metricsBySource.has(node.id)||runResults.spectrumByNode.has(node.id)));return <div className="node-body source-node-body"><div className="source-wave-preview"><TinyWave samples={signal?.samples??[]}/><div><strong>{signal?.fileName??"未导入波形"}</strong><small>{signal?`${signal.samples.length.toLocaleString()} 点 · ${calculated?"已完成计算":"待运行计算"}`:"每个节点保存独立数据"}</small></div></div><div className="source-node-actions"><label><input type="file" accept=".txt,.csv" onChange={(event)=>{loadFile(node.id,event.target.files?.[0]);event.currentTarget.value="";}}/><span>＋ 导入波形</span></label><button onClick={()=>loadDemo(node.id)}>演示数据</button></div></div>;})()}
+              {node.type === "feature" && node.metric && (()=>{const linked=connections.some((edge)=>edge.target===node.id);const value=runResults?.valueByNode.get(node.id);return <div className="node-body value-body"><span>{metricInfo[node.metric].label}</span><strong>{value===undefined?"—":value.toFixed(node.metric==="kurtosis"||node.metric==="crest"?2:3)}</strong><small>{!linked?"等待连接":!runResults?"点击运行诊断":value===undefined?"上游无波形":metricInfo[node.metric].unit}</small></div>;})()}
               {node.type === "peakSearch" && (() => {
                 const linked = connections.some((edge) => edge.target === node.id);
-                const result = linked ? peakResultsById.get(node.id) ?? {peaks:[],energyPercent:0,bandPointCount:0} : {peaks:[],energyPercent:0,bandPointCount:0};
+                const result = runResults?.peakResultsByNode.get(node.id);
                 return <div className="node-body peak-search-body">
                   <label className="field-label">搜索频段 <span>Hz</span></label>
                   <div className="range-fields"><input aria-label="搜索起始频率" type="number" min="0" value={node.searchMinHz ?? 0} onChange={(event)=>updateNode(node.id,{searchMinHz:Number(event.target.value)})}/><b>—</b><input aria-label="搜索结束频率" type="number" min="0" value={node.searchMaxHz ?? Math.min(1000,fs/2)} onChange={(event)=>updateNode(node.id,{searchMaxHz:Number(event.target.value)})}/></div>
                   <label className="field-label mode-label">搜索方式<select value={node.searchMode ?? "energy"} onChange={(event)=>updateNode(node.id,{searchMode:event.target.value as SearchMode})}><option value="energy">能量占比</option><option value="harmonic">倍频搜索</option></select></label>
                   {(node.searchMode ?? "energy") === "energy" ? <div className="energy-settings"><label>累计能量上限</label><div><input aria-label="累计能量上限" type="number" min="1" max="100" value={node.energyRatio ?? 80} onChange={(event)=>updateNode(node.id,{energyRatio:Number(event.target.value)})}/><span>%</span></div><small>峰值按幅值降序累加，不超过该占比</small></div> : <div className="harmonic-settings"><div className="theory-base"><span>理论基频</span><b>{bpfo.toFixed(2)} Hz · BPFO</b></div><div className="harmonic-fields"><label>搜索到<input aria-label="搜索倍频数" type="number" min="1" max="20" value={node.harmonicCount ?? 3} onChange={(event)=>updateNode(node.id,{harmonicCount:Number(event.target.value)})}/><span>倍频</span></label><label>左右容差<input aria-label="倍频搜索容差" type="number" min="0.1" step="0.1" value={node.toleranceHz ?? 3} onChange={(event)=>updateNode(node.id,{toleranceHz:Number(event.target.value)})}/><span>Hz</span></label></div></div>}
-                  <div className={`peak-results ${linked&&samples.length?"ready":""}`}><div><span>{!linked?"请连接 FFT 频谱":!samples.length?"等待导入数据":`${result.peaks.length} 个峰值`}</span>{linked&&samples.length&&<small>{node.searchMode==="harmonic"?"理论频率附近最大峰":"已选峰值能量 "+result.energyPercent.toFixed(1)+"%"}</small>}</div>{linked&&samples.length&&<strong>{result.peaks[0]?`${result.peaks[0].f.toFixed(2)} Hz` : "无结果"}</strong>}</div>
-                  {linked&&samples.length&&result.peaks.length>0&&<div className="peak-list">{result.peaks.slice(0,4).map((peak,index)=><span key={`${peak.f}-${index}`}><b>{peak.order?`${peak.order}×`:`#${index+1}`}</b>{peak.f.toFixed(2)} Hz<em>{peak.a.toFixed(3)}</em></span>)}</div>}
+                  <div className={`peak-results ${result?"ready":""}`}><div><span>{!linked?"请连接 FFT 频谱":!runResults?"等待运行诊断":!result?"上游没有有效波形":`${result.peaks.length} 个峰值`}</span>{result&&<small>{node.searchMode==="harmonic"?"理论频率附近最大峰":"已选峰值能量 "+result.energyPercent.toFixed(1)+"%"}</small>}</div>{result&&<strong>{result.peaks[0]?`${result.peaks[0].f.toFixed(2)} Hz` : "无结果"}</strong>}</div>
+                  {result&&result.peaks.length>0&&<div className="peak-list">{result.peaks.slice(0,4).map((peak,index)=><span key={`${peak.f}-${index}`}><b>{peak.order?`${peak.order}×`:`#${index+1}`}</b>{peak.f.toFixed(2)} Hz<em>{peak.a.toFixed(3)}</em></span>)}</div>}
                 </div>;
               })()}
-              {node.type === "condition" && <div className="node-body condition-body"><select value={node.metric} onChange={(event)=>updateNode(node.id,{metric:event.target.value as MetricKey})}>{Object.entries(metricInfo).map(([key,info])=><option value={key} key={key}>{info.label}</option>)}</select><div><select value={node.operator} onChange={(event)=>updateNode(node.id,{operator:event.target.value as ">"|"<"})}><option value=">">大于</option><option value="<">小于</option></select><input value={node.threshold} type="number" step="0.01" onChange={(event)=>updateNode(node.id,{threshold:Number(event.target.value)})}/></div><small className={evaluateNode(node.id)?"pass":""}>当前 {node.metric?metrics[node.metric].toFixed(3):"—"} · {evaluateNode(node.id)?"满足":"未满足"}</small></div>}
-              {node.type === "logic" && <div className="node-body logic-body"><div><button className={node.logic==="AND"?"active":""} onClick={()=>updateNode(node.id,{logic:"AND",title:"全部满足"})}>AND</button><button className={node.logic==="OR"?"active":""} onClick={()=>updateNode(node.id,{logic:"OR",title:"任一满足"})}>OR</button></div><small>{connections.filter((edge)=>edge.target===node.id).length} 个输入</small></div>}
+              {node.type === "condition" && (()=>{const linked=connections.some((edge)=>edge.target===node.id);const value=runResults?.valueByNode.get(node.id);const pass=runResults?.nodePass.get(node.id);return <div className="node-body condition-body"><select value={node.metric} onChange={(event)=>updateNode(node.id,{metric:event.target.value as MetricKey})}>{Object.entries(metricInfo).map(([key,info])=><option value={key} key={key}>{info.label}</option>)}</select><div><select value={node.operator} onChange={(event)=>updateNode(node.id,{operator:event.target.value as ">"|"<"})}><option value=">">大于</option><option value="<">小于</option></select><input value={node.threshold} type="number" step="0.01" onChange={(event)=>updateNode(node.id,{threshold:Number(event.target.value)})}/></div><small className={pass?"pass":""}>{!linked?"等待连接数据":!runResults?"等待运行诊断":value===undefined?"上游没有有效波形":`当前 ${value.toFixed(3)} · ${pass?"满足":"未满足"}`}</small></div>;})()}
+              {node.type === "logic" && <div className="node-body logic-body"><div><button className={node.logic==="AND"?"active":""} onClick={()=>updateNode(node.id,{logic:"AND",title:"全部满足"})}>AND</button><button className={node.logic==="OR"?"active":""} onClick={()=>updateNode(node.id,{logic:"OR",title:"任一满足"})}>OR</button></div><small>{runResults&&runResults.nodePass.has(node.id)?(runResults.nodePass.get(node.id)?"计算满足":"计算未满足"):`${connections.filter((edge)=>edge.target===node.id).length} 个输入`}</small></div>}
               {node.type === "display" && (() => {
                 const inputId = connections.find((edge)=>edge.target===node.id)?.source;
                 const inputNode = inputId ? nodeById.get(inputId) : undefined;
                 const mode = inferDisplayMode(node, inputNode);
-                const searchResult = inputNode?.type==="peakSearch" ? peakResultsById.get(inputNode.id) : undefined;
+                const sourceId = inputNode ? (inputNode.type==="source"?inputNode.id:runResults?.sourceIdByNode.get(inputNode.id)) : undefined;
+                const signal = sourceId ? sourceSignals[sourceId] : undefined;
+                const displaySamples = signal?.samples ?? [];
+                const displaySpectrum = inputNode ? runResults?.spectrumByNode.get(inputNode.id) ?? [] : [];
+                const searchResult = inputNode?.type==="peakSearch" ? runResults?.peakResultsByNode.get(inputNode.id) : undefined;
                 const minHz = inputNode?.type==="peakSearch" ? inputNode.searchMinHz ?? 0 : 0;
                 const maxHz = inputNode?.type==="peakSearch" ? inputNode.searchMaxHz ?? fs/2 : fs/2;
                 const metric = inputNode?.metric;
+                const value = inputNode ? runResults?.valueByNode.get(inputNode.id) : undefined;
+                const ready = mode==="waveform" ? Boolean(signal&&(inputNode?.type==="source"||runResults)) : mode==="spectrum" ? Boolean(runResults&&displaySpectrum.length) : Boolean(runResults&&value!==undefined);
                 const openPreview = (event: React.MouseEvent) => { event.stopPropagation(); setPreviewNodeId(node.id); };
                 return <div className="node-body display-body">
-                  <div className="display-controls"><select aria-label="显示数据类型" value={node.displayMode ?? "auto"} onChange={(event)=>updateNode(node.id,{displayMode:event.target.value as DisplayMode})}><option value="auto">自动识别</option><option value="waveform">波形</option><option value="spectrum">频谱</option><option value="value">数值</option></select><span>{inputNode?`来源：${inputNode.title}`:"等待连接数据"}</span><button className="open-preview" disabled={!inputNode} onClick={openPreview}>放大</button></div>
-                  {inputNode&&mode==="waveform"&&<button type="button" className="chart-preview" onClick={openPreview}><DataWave samples={samples}/><div className="chart-axis"><span>0 s</span><b>点击查看真实数据</b><span>{(samples.length/fs).toFixed(2)} s</span></div></button>}
-                  {inputNode&&mode==="spectrum"&&<button type="button" className="chart-preview" onClick={openPreview}><SpectrumChart spectrum={spectrum} minHz={minHz} maxHz={maxHz} peaks={searchResult?.peaks}/><div className="chart-axis"><span>{minHz.toFixed(0)} Hz</span><b>{searchResult?.peaks.length?`${searchResult.peaks.length} 个峰值已标记`:"点击查看真实频谱"}</b><span>{maxHz.toFixed(0)} Hz</span></div></button>}
-                  {inputNode&&mode==="value"&&<button type="button" className="chart-preview" onClick={openPreview}><div className="display-value"><span>{metric?metricInfo[metric].label:"数据值"}</span><strong>{metric?metrics[metric].toFixed(metric==="kurtosis"||metric==="crest"?2:3):"—"}</strong><small>{metric?metricInfo[metric].unit:"当前输入无标量值"}</small></div></button>}
+                  <div className="display-controls"><select aria-label="显示数据类型" value={node.displayMode ?? "auto"} onChange={(event)=>updateNode(node.id,{displayMode:event.target.value as DisplayMode})}><option value="auto">自动识别</option><option value="waveform">波形</option><option value="spectrum">频谱</option><option value="value">数值</option></select><span>{inputNode?`来源：${inputNode.title}`:"等待连接数据"}</span><button className="open-preview" disabled={!ready} onClick={openPreview}>放大</button></div>
+                  {inputNode&&mode==="waveform"&&ready&&<button type="button" className="chart-preview" onClick={openPreview}><DataWave samples={displaySamples}/><div className="chart-axis"><span>0 s</span><b>点击查看真实数据</b><span>{(displaySamples.length/fs).toFixed(2)} s</span></div></button>}
+                  {inputNode&&mode==="spectrum"&&ready&&<button type="button" className="chart-preview" onClick={openPreview}><SpectrumChart spectrum={displaySpectrum} minHz={minHz} maxHz={maxHz} peaks={searchResult?.peaks}/><div className="chart-axis"><span>{minHz.toFixed(0)} Hz</span><b>{searchResult?.peaks.length?`${searchResult.peaks.length} 个峰值已标记`:"点击查看真实频谱"}</b><span>{maxHz.toFixed(0)} Hz</span></div></button>}
+                  {inputNode&&mode==="value"&&ready&&<button type="button" className="chart-preview" onClick={openPreview}><div className="display-value"><span>{metric?metricInfo[metric].label:"数据值"}</span><strong>{value===undefined?"—":value.toFixed(metric==="kurtosis"||metric==="crest"?2:3)}</strong><small>{value===undefined?"等待运行诊断":metric?metricInfo[metric].unit:"当前输入无标量值"}</small></div></button>}
+                  {inputNode&&!ready&&<div className="display-empty"><span>▶</span><p>{!signal?"请先在对应波形节点中导入数据":"点击右上角运行诊断后显示"}</p></div>}
                   {!inputNode&&<div className="display-empty"><span>▥</span><p>连接波形、FFT 频谱或峰值搜索节点</p></div>}
                 </div>;
               })()}
@@ -792,7 +924,7 @@ export default function Home() {
           <div>
             <span>接入数据详情</span>
             <h2>{previewMode==="waveform"?"真实波形数据":previewMode==="spectrum"?"真实频谱数据":"真实计算数据"}</h2>
-            <p>{fileName} · 来源节点：{previewInputNode.title}</p>
+            <p>{previewSignal?.fileName??"未导入波形"} · 来源节点：{previewInputNode.title}</p>
           </div>
           <button className="modal-close" aria-label="关闭数据详情" onClick={()=>setPreviewNodeId(null)}>×</button>
         </header>
@@ -800,24 +932,24 @@ export default function Home() {
         <div className="modal-data-summary">
           <span className="modal-badge live"><i/>当前接入数据</span>
           <span className="modal-badge">采样频率 {fs.toLocaleString()} Hz</span>
-          <span className="modal-badge">{samples.length.toLocaleString()} 个原始采样点</span>
+          <span className="modal-badge">{previewSamples.length.toLocaleString()} 个原始采样点</span>
           {previewMode==="spectrum"&&<span className="modal-badge">频段 {Math.min(previewMinHz,previewMaxHz).toFixed(1)}–{Math.max(previewMinHz,previewMaxHz).toFixed(1)} Hz</span>}
         </div>
 
         <div className="detail-chart-panel">
-          {!samples.length&&<div className="modal-empty"><span>∿</span><strong>等待真实数据</strong><p>请先从左侧导入 TXT / CSV 波形，或载入演示波形。</p></div>}
-          {samples.length>0&&previewMode==="waveform"&&<DetailedWave samples={samples} fs={fs}/>} 
-          {samples.length>0&&previewMode==="spectrum"&&<DetailedSpectrum spectrum={spectrum} minHz={previewMinHz} maxHz={previewMaxHz} peaks={previewSearchResult?.peaks}/>} 
-          {samples.length>0&&previewMode==="value"&&<div className="modal-value"><span>{previewInputNode.metric?metricInfo[previewInputNode.metric].label:"当前计算值"}</span><strong>{previewInputNode.metric?metrics[previewInputNode.metric].toFixed(previewInputNode.metric==="kurtosis"||previewInputNode.metric==="crest"?3:4):"—"}</strong><small>{previewInputNode.metric?metricInfo[previewInputNode.metric].unit:"当前输入没有可展示的标量值"}</small></div>}
+          {!previewSamples.length&&<div className="modal-empty"><span>∿</span><strong>等待真实数据</strong><p>请在对应的振动波形节点中导入 TXT / CSV 或载入演示数据。</p></div>}
+          {previewSamples.length>0&&previewMode==="waveform"&&<DetailedWave samples={previewSamples} fs={fs}/>} 
+          {previewSamples.length>0&&previewMode==="spectrum"&&<DetailedSpectrum spectrum={previewSpectrum} minHz={previewMinHz} maxHz={previewMaxHz} peaks={previewSearchResult?.peaks}/>} 
+          {previewSamples.length>0&&previewMode==="value"&&<div className="modal-value"><span>{previewInputNode.metric?metricInfo[previewInputNode.metric].label:"当前计算值"}</span><strong>{previewValue===undefined?"—":previewValue.toFixed(previewInputNode.metric==="kurtosis"||previewInputNode.metric==="crest"?3:4)}</strong><small>{previewValue===undefined?"等待运行诊断":previewInputNode.metric?metricInfo[previewInputNode.metric].unit:"当前输入没有可展示的标量值"}</small></div>}
         </div>
 
         {previewMode==="waveform"&&<div className="data-stats-grid">
-          <div><span>采样点数</span><strong>{samples.length.toLocaleString()}</strong><small>points</small></div>
-          <div><span>采样时长</span><strong>{(samples.length/Math.max(1,fs)).toFixed(4)}</strong><small>s</small></div>
-          <div><span>最小幅值</span><strong>{signalRange.min.toFixed(4)}</strong><small>signal</small></div>
-          <div><span>最大幅值</span><strong>{signalRange.max.toFixed(4)}</strong><small>signal</small></div>
-          <div><span>有效值 RMS</span><strong>{metrics.rms.toFixed(4)}</strong><small>signal</small></div>
-          <div><span>峰值</span><strong>{metrics.peak.toFixed(4)}</strong><small>signal</small></div>
+          <div><span>采样点数</span><strong>{previewSamples.length.toLocaleString()}</strong><small>points</small></div>
+          <div><span>采样时长</span><strong>{(previewSamples.length/Math.max(1,fs)).toFixed(4)}</strong><small>s</small></div>
+          <div><span>最小幅值</span><strong>{previewSignalRange.min.toFixed(4)}</strong><small>signal</small></div>
+          <div><span>最大幅值</span><strong>{previewSignalRange.max.toFixed(4)}</strong><small>signal</small></div>
+          <div><span>有效值 RMS</span><strong>{previewMetrics?previewMetrics.rms.toFixed(4):"—"}</strong><small>{previewMetrics?"signal":"运行后计算"}</small></div>
+          <div><span>峰值</span><strong>{previewMetrics?previewMetrics.peak.toFixed(4):"—"}</strong><small>{previewMetrics?"signal":"运行后计算"}</small></div>
         </div>}
 
         {previewMode==="spectrum"&&<div className="data-stats-grid">
@@ -831,8 +963,8 @@ export default function Home() {
 
         {previewMode==="value"&&previewInputNode.metric&&<div className="data-stats-grid value-stats">
           <div><span>指标名称</span><strong>{metricInfo[previewInputNode.metric].label}</strong><small>{previewInputNode.title}</small></div>
-          <div><span>当前计算值</span><strong>{metrics[previewInputNode.metric].toFixed(5)}</strong><small>{metricInfo[previewInputNode.metric].unit}</small></div>
-          <div><span>输入采样点</span><strong>{samples.length.toLocaleString()}</strong><small>points</small></div>
+          <div><span>当前计算值</span><strong>{previewValue===undefined?"—":previewValue.toFixed(5)}</strong><small>{metricInfo[previewInputNode.metric].unit}</small></div>
+          <div><span>输入采样点</span><strong>{previewSamples.length.toLocaleString()}</strong><small>points</small></div>
         </div>}
 
         {previewSearchResult&&previewSearchResult.peaks.length>0&&<section className="modal-peak-section">
@@ -840,7 +972,7 @@ export default function Home() {
           <div className="peak-table-wrap"><table><thead><tr><th>序号</th>{previewSearchResult.peaks.some((peak)=>peak.theoretical!==undefined)&&<th>理论频率</th>}<th>搜索频率</th>{previewSearchResult.peaks.some((peak)=>peak.theoretical!==undefined)&&<th>偏差</th>}<th>峰值幅值</th></tr></thead><tbody>{previewSearchResult.peaks.slice(0,40).map((peak,index)=><tr key={`${peak.f}-${index}`}><td>{peak.order?`${peak.order} 倍频`:`#${index+1}`}</td>{peak.theoretical!==undefined&&<td>{peak.theoretical.toFixed(2)} Hz</td>}<td><b>{peak.f.toFixed(3)} Hz</b></td>{peak.theoretical!==undefined&&<td>{(peak.f-peak.theoretical).toFixed(3)} Hz</td>}<td>{peak.a.toFixed(5)}</td></tr>)}</tbody></table></div>
         </section>}
 
-        <footer className="modal-note"><span>i</span><p>图形来自当前连接链路的真实数据。波形大图使用全部 {samples.length.toLocaleString()} 个采样点生成逐像素极值包络，频谱由当前采样率下的 FFT 结果绘制；缩放显示不会修改原始数据。</p></footer>
+        <footer className="modal-note"><span>i</span><p>图形来自当前连接链路中“{previewSignal?.fileName??"未导入波形"}”的真实数据。波形大图使用全部 {previewSamples.length.toLocaleString()} 个采样点；FFT、特征与峰值只在点击“运行诊断”后更新。</p></footer>
       </section>
     </div>}
   </main>;

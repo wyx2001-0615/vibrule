@@ -143,6 +143,11 @@ button { color: inherit; }
 }
 .import-area > button::after { content: "演示\A波形"; white-space: pre; font-size: 11px; line-height: 1.5; }
 .import-area > button:hover { border-color: #9db8dc; background: #f6f9ff; }
+.source-import-tip { margin: 0 15px 14px; padding: 11px; display: grid; grid-template-columns: 28px 1fr; align-items: center; gap: 9px; border: 1px solid #c9dcf5; border-radius: 9px; background: linear-gradient(135deg,#f4f8ff,#f4fbfc); }
+.source-import-tip > span { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 8px; background: #e2edff; color: var(--primary); font-size: 12px; font-weight: 800; }
+.source-import-tip strong, .source-import-tip small { display: block; }
+.source-import-tip strong { color: #344054; font-size: 10px; }
+.source-import-tip small { margin-top: 4px; color: var(--muted); font-size: 8px; line-height: 1.45; }
 .quick-params { padding: 12px 15px; border-top: 1px solid #edf1f6; border-bottom: 1px solid #edf1f6; background: #fbfcfe; }
 .quick-params label {
   height: 35px;
@@ -396,6 +401,20 @@ button { color: inherit; }
 .tiny-wave line { stroke: #e1e7ee; stroke-width: .8; }
 .tiny-wave polyline { fill: none; stroke: var(--cyan); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .wave-body > span { color: var(--muted); font-size: 9px; }
+.source-node-body { padding: 10px; }
+.source-wave-preview { min-width: 0; display: grid; grid-template-columns: 78px minmax(0,1fr); align-items: center; gap: 8px; }
+.source-wave-preview .tiny-wave { width: 78px; height: 40px; padding: 3px; border: 1px solid #e0e9f2; border-radius: 7px; background: #f8fbfd; }
+.source-wave-preview > div { min-width: 0; }
+.source-wave-preview strong, .source-wave-preview small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.source-wave-preview strong { color: #344054; font-size: 9px; }
+.source-wave-preview small { margin-top: 5px; color: var(--muted); font-size: 8px; }
+.source-node-actions { margin-top: 9px; display: grid; grid-template-columns: 1fr 72px; gap: 6px; }
+.source-node-actions label, .source-node-actions button { height: 30px; display: grid; place-items: center; border-radius: 6px; font-size: 9px; font-weight: 750; cursor: pointer; }
+.source-node-actions label { border: 1px solid #aac7ee; background: #edf4ff; color: var(--primary); }
+.source-node-actions label:hover { background: #dfeaff; }
+.source-node-actions label input { display: none; }
+.source-node-actions button { border: 1px solid var(--line); background: #fff; color: #526174; }
+.source-node-actions button:hover { border-color: #aac7d9; background: #f6f9fc; color: #18728c; }
 .value-body { display: grid; grid-template-columns: 1fr auto; align-items: end; }
 .value-body span { grid-column: 1; color: var(--muted); font-size: 10px; }
 .value-body strong { grid-column: 1; margin-top: 3px; color: #243247; font-size: 19px; }
