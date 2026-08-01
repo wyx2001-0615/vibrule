@@ -272,12 +272,38 @@ button { color: inherit; }
   position: relative;
   overflow: hidden;
   touch-action: none;
-  cursor: grab;
+  cursor: crosshair;
   background-color: #f7f9fc;
   background-image: radial-gradient(circle, #cbd6e4 1.15px, transparent 1.15px);
   user-select: none;
 }
 .canvas-viewport.panning { cursor: grabbing; }
+.selection-marquee {
+  position: absolute;
+  z-index: 3;
+  border: 1.5px solid #3b82f6;
+  border-radius: 4px;
+  background: rgba(59, 130, 246, .12);
+  box-shadow: 0 0 0 1px rgba(255,255,255,.7) inset;
+  pointer-events: none;
+}
+.selection-marquee > span {
+  position: absolute;
+  left: -1px;
+  top: -25px;
+  min-width: 68px;
+  height: 21px;
+  padding: 0 7px;
+  display: grid;
+  place-items: center;
+  border-radius: 5px;
+  background: #2563eb;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 750;
+  white-space: nowrap;
+  box-shadow: 0 4px 10px rgba(37,99,235,.22);
+}
 .canvas-plane {
   width: 1px;
   height: 1px;

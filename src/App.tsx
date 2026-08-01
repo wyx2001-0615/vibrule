@@ -25,6 +25,7 @@ type FlowNode = {
 };
 type Connection = { id: string; source: string; target: string };
 type CanvasView = { x: number; y: number; scale: number };
+type SelectionBox = { left: number; top: number; width: number; height: number };
 type PeakResult = SpectrumPoint & { order?: number; theoretical?: number };
 type PeakSearchResult = { peaks: PeakResult[]; energyPercent: number; bandPointCount: number };
 
@@ -287,17 +288,19 @@ export default function Home() {
   const [fs, setFs] = useState(12800);
   const [rpm, setRpm] = useState(1485);
   const [bpfo, setBpfo] = useState(148.2);
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [diagnosis, setDiagnosis] = useState<{ fault: boolean; matched: number; total: number } | null>(null);
   const [toast, setToast] = useState("");
   const [draftLink, setDraftLink] = useState<{ source: string; x: number; y: number } | null>(null);
   const [canvasView, setCanvasViewState] = useState<CanvasView>(INITIAL_VIEW);
   const [isPanning, setIsPanning] = useState(false);
+  const [selectionBox, setSelectionBox] = useState<SelectionBox | null>(null);
   const [previewNodeId, setPreviewNodeId] = useState<string | null>(null);
   const canvasViewportRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ id: string; dx: number; dy: number } | null>(null);
   const linkRef = useRef<{ source: string } | null>(null);
   const panRef = useRef<{ startX: number; startY: number; originX: number; originY: number } | null>(null);
+  const selectionRef = useRef<{ startX: number; startY: number; currentX: number; currentY: number } | null>(null);
   const viewRef = useRef<CanvasView>(INITIAL_VIEW);
 
   const spectrum = useMemo(() => samples.length >= 64 ? calculateSpectrum(samples, fs) : [], [samples, fs]);
@@ -373,6 +376,25 @@ export default function Home() {
         const { startX, startY, originX, originY } = panRef.current;
         setCanvasView((current) => ({ ...current, x: originX + event.clientX - startX, y: originY + event.clientY - startY }));
       }
+      if (selectionRef.current) {
+        selectionRef.current.currentX = event.clientX;
+        selectionRef.current.currentY = event.clientY;
+        const viewport = canvasViewportRef.current;
+        if (viewport) {
+          const viewportRect = viewport.getBoundingClientRect();
+          const left = Math.max(viewportRect.left, Math.min(selectionRef.current.startX, event.clientX));
+          const right = Math.min(viewportRect.right, Math.max(selectionRef.current.startX, event.clientX));
+          const top = Math.max(viewportRect.top, Math.min(selectionRef.current.startY, event.clientY));
+          const bottom = Math.min(viewportRect.bottom, Math.max(selectionRef.current.startY, event.clientY));
+          setSelectionBox({ left: left - viewportRect.left, top: top - viewportRect.top, width: Math.max(0, right - left), height: Math.max(0, bottom - top) });
+          const selected = Array.from(viewport.querySelectorAll<HTMLElement>(".flow-node[data-node-id]")).flatMap((element) => {
+            const rect = element.getBoundingClientRect();
+            const intersects = rect.left < right && rect.right > left && rect.top < bottom && rect.bottom > top;
+            return intersects && element.dataset.nodeId ? [element.dataset.nodeId] : [];
+          });
+          setSelectedIds(selected);
+        }
+      }
       if (dragRef.current) {
         const { id, dx, dy } = dragRef.current;
         const point = screenToCanvas(event.clientX, event.clientY);
@@ -388,7 +410,9 @@ export default function Home() {
     const handleUp = (event: PointerEvent) => {
       dragRef.current = null;
       panRef.current = null;
+      selectionRef.current = null;
       setIsPanning(false);
+      setSelectionBox(null);
       if (linkRef.current) {
         const source = linkRef.current.source;
         const element = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
@@ -408,13 +432,11 @@ export default function Home() {
     const viewport = canvasViewportRef.current;
     if (!viewport) return;
     const handleWheel = (event: WheelEvent) => {
-      event.preventDefault();
       if (event.ctrlKey) {
+        event.preventDefault();
         const rect = viewport.getBoundingClientRect();
         const factor = Math.exp(-event.deltaY * 0.0015);
         zoomCanvas(viewRef.current.scale * factor, event.clientX - rect.left, event.clientY - rect.top);
-      } else {
-        setCanvasView((current) => ({ ...current, x: current.x - event.deltaX, y: current.y - event.deltaY }));
       }
     };
     viewport.addEventListener("wheel", handleWheel, { passive: false });
@@ -427,6 +449,23 @@ export default function Home() {
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [previewNodeId]);
+
+  useEffect(() => {
+    const deleteSelectedNodes = (event: KeyboardEvent) => {
+      if (event.key !== "Delete" || !selectedIds.length || previewNodeId) return;
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("input,textarea,select,button,[contenteditable='true']")) return;
+      event.preventDefault();
+      const ids = new Set(selectedIds);
+      setNodes((current) => current.filter((node) => !ids.has(node.id)));
+      setConnections((current) => current.filter((edge) => !ids.has(edge.source) && !ids.has(edge.target)));
+      setSelectedIds([]);
+      setDiagnosis(null);
+      notify(`已删除 ${ids.size} 个节点`);
+    };
+    window.addEventListener("keydown", deleteSelectedNodes);
+    return () => window.removeEventListener("keydown", deleteSelectedNodes);
+  }, [selectedIds, previewNodeId]);
 
   function notify(text: string) {
     setToast(text);
@@ -448,27 +487,37 @@ export default function Home() {
   }
 
   function startNodeDrag(event: React.PointerEvent, id: string) {
+    if (event.button !== 0) return;
     const target = event.target as HTMLElement;
     if (target.closest("button,input,select,.port,.chart-preview")) return;
     const node = nodes.find((item) => item.id === id);
     if (!node) return;
     const point = screenToCanvas(event.clientX, event.clientY);
     dragRef.current = { id, dx: point.x - node.x, dy: point.y - node.y };
-    setSelected(id);
+    setSelectedIds([id]);
   }
 
-  function startCanvasPan(event: React.PointerEvent<HTMLDivElement>) {
-    if (event.button !== 0 && event.button !== 1) return;
+  function startCanvasInteraction(event: React.PointerEvent<HTMLDivElement>) {
     const target = event.target as HTMLElement;
+    if (event.button === 1) {
+      event.preventDefault();
+      const view = viewRef.current;
+      panRef.current = { startX: event.clientX, startY: event.clientY, originX: view.x, originY: view.y };
+      setIsPanning(true);
+      return;
+    }
     if (target.closest(".flow-node,.edge-layer path,button,input,select,.canvas-tip")) return;
+    if (event.button !== 0) return;
     event.preventDefault();
-    const view = viewRef.current;
-    panRef.current = { startX: event.clientX, startY: event.clientY, originX: view.x, originY: view.y };
-    setIsPanning(true);
-    setSelected(null);
+    selectionRef.current = { startX: event.clientX, startY: event.clientY, currentX: event.clientX, currentY: event.clientY };
+    const viewport = canvasViewportRef.current;
+    const rect = viewport?.getBoundingClientRect();
+    setSelectionBox(rect ? { left: event.clientX - rect.left, top: event.clientY - rect.top, width: 0, height: 0 } : null);
+    setSelectedIds([]);
   }
 
   function startConnection(event: React.PointerEvent, source: string) {
+    if (event.button !== 0) return;
     event.preventDefault(); event.stopPropagation();
     const point = screenToCanvas(event.clientX, event.clientY);
     linkRef.current = { source };
@@ -495,7 +544,7 @@ export default function Home() {
       ? { searchMode: "energy", searchMinHz: 0, searchMaxHz: Math.min(1000, fs / 2), energyRatio: 80, harmonicCount: 3, toleranceHz: 3 }
       : item.type === "display" ? { displayMode: "auto" } : {};
     setNodes((current) => [...current, { id, type: item.type, title: item.title, metric: item.metric, logic: item.logic, operator: ">", threshold: item.metric === "kurtosis" ? 3.5 : .2, x: point.x - NODE_WIDTH / 2, y: point.y - PORT_Y, ...specialDefaults }]);
-    setSelected(id); setDiagnosis(null);
+    setSelectedIds([id]); setDiagnosis(null);
   }
 
   function updateNode(id: string, change: Partial<FlowNode>) {
@@ -506,8 +555,18 @@ export default function Home() {
   function removeNode(id: string) {
     setNodes((current) => current.filter((node) => node.id !== id));
     setConnections((current) => current.filter((edge) => edge.source !== id && edge.target !== id));
-    setSelected((current) => current === id ? null : current); setDiagnosis(null);
+    setSelectedIds((current) => current.filter((selectedId) => selectedId !== id)); setDiagnosis(null);
     setPreviewNodeId((current) => current === id ? null : current);
+  }
+
+  function clearCanvas() {
+    setNodes([]);
+    setConnections([]);
+    setSelectedIds([]);
+    setDraftLink(null);
+    setDiagnosis(null);
+    setPreviewNodeId(null);
+    notify("画布已清空，导入的数据仍然保留");
   }
 
   function evaluateNode(id: string, visiting = new Set<string>()): boolean {
@@ -614,7 +673,8 @@ export default function Home() {
   }
 
   const nodeById = new Map(nodes.map((node) => [node.id, node]));
-  const selectedNode = nodes.find((node) => node.id === selected);
+  const selectedNodes = nodes.filter((node) => selectedIds.includes(node.id));
+  const selectedNode = selectedNodes.length === 1 ? selectedNodes[0] : undefined;
   const resultText = diagnosis ? (diagnosis.fault ? "疑似轴承外圈故障" : "未触发故障规则") : "等待运行";
   const previewNode = previewNodeId ? nodeById.get(previewNodeId) : undefined;
   const previewInputId = previewNode ? connections.find((edge) => edge.target === previewNode.id)?.source : undefined;
@@ -632,8 +692,9 @@ export default function Home() {
       <div className="flow-brand"><span>∿</span><div><strong>VibRule</strong><small>工业振动规则诊断平台</small></div></div>
       <div className="flow-actions">
         <span className="data-state"><i className={samples.length ? "ready" : ""}/>{samples.length ? `${fileName} · ${samples.length.toLocaleString()} 点` : "尚未导入波形"}</span>
-        <button className="ghost-button" onClick={() => {setNodes(starterNodes);setConnections(starterConnections);setDiagnosis(null);setCanvasView(INITIAL_VIEW);}}>恢复示例</button>
+        <button className="ghost-button" onClick={() => {setNodes(starterNodes);setConnections(starterConnections);setSelectedIds([]);setDiagnosis(null);setPreviewNodeId(null);setCanvasView(INITIAL_VIEW);}}>恢复示例</button>
         <button className="ghost-button" onClick={() => {setConnections([]);setDiagnosis(null);}}>清空连线</button>
+        <button className="ghost-button clear-canvas-button" onClick={clearCanvas}>清空画布</button>
         <button className="run-button" onClick={runDiagnosis}>▶ 运行诊断</button>
       </div>
     </header>
@@ -651,7 +712,7 @@ export default function Home() {
 
       <section className="canvas-area">
         <div className="canvas-toolbar">
-          <div className="canvas-title"><strong>外圈故障诊断流程</strong><span>拖动空白区域平移画布 · 拖动端口自由连线</span></div>
+          <div className="canvas-title"><strong>外圈故障诊断流程</strong><span>左键拖动框选节点 · 按住滚轮平移画布 · 拖动端口自由连线</span></div>
           <div className="canvas-tools">
             <div className="legend"><span><i className="source-dot"/>数据</span><span><i className="feature-dot"/>计算</span><span><i className="condition-dot"/>条件</span><span><i className="output-dot"/>输出</span><span><i className="report-dot"/>报告</span></div>
             <div className="zoom-control"><button aria-label="缩小画布" onClick={() => zoomCanvas(canvasView.scale - .1)}>−</button><button className="zoom-value" onClick={() => setCanvasView(INITIAL_VIEW)}>{Math.round(canvasView.scale * 100)}%</button><button aria-label="放大画布" onClick={() => zoomCanvas(canvasView.scale + .1)}>＋</button><button className="view-reset" onClick={() => setCanvasView(INITIAL_VIEW)}>复位</button></div>
@@ -661,10 +722,10 @@ export default function Home() {
           className={`canvas-viewport ${isPanning ? "panning" : ""}`}
           ref={canvasViewportRef}
           style={{ backgroundSize: `${24 * canvasView.scale}px ${24 * canvasView.scale}px`, backgroundPosition: `${canvasView.x}px ${canvasView.y}px` }}
-          onPointerDown={startCanvasPan}
+          onPointerDown={startCanvasInteraction}
+          onAuxClick={(event)=>event.preventDefault()}
           onDragOver={(event) => {event.preventDefault();event.dataTransfer.dropEffect="copy";}}
           onDrop={addNodeFromPalette}
-          onClick={() => setSelected(null)}
         >
           <div className="canvas-plane" style={{ transform: `translate(${canvasView.x}px, ${canvasView.y}px) scale(${canvasView.scale})` }}>
             <svg className="edge-layer" width="1" height="1">
@@ -676,7 +737,7 @@ export default function Home() {
               })}
               {draftLink && (() => { const source=nodeById.get(draftLink.source); if(!source)return null;const sx=source.x+NODE_WIDTH,sy=source.y+PORT_Y;return <path className="draft-edge" d={`M${sx},${sy} C${sx+80},${sy} ${draftLink.x-80},${draftLink.y} ${draftLink.x},${draftLink.y}`}/>; })()}
             </svg>
-            {nodes.map((node) => <article key={node.id} className={`flow-node ${node.type} ${selected===node.id?"selected":""}`} style={{left:node.x,top:node.y}} onPointerDown={(event)=>startNodeDrag(event,node.id)} onClick={(event)=>{event.stopPropagation();setSelected(node.id);}}>
+            {nodes.map((node) => <article key={node.id} data-node-id={node.id} className={`flow-node ${node.type} ${selectedIds.includes(node.id)?"selected":""}`} style={{left:node.x,top:node.y}} onPointerDown={(event)=>startNodeDrag(event,node.id)} onClick={(event)=>{event.stopPropagation();setSelectedIds([node.id]);}}>
               <button className="input-port port" data-input-node={node.id} aria-label={`连接到${node.title}`} onPointerUp={(event)=>finishConnection(event,node.id)}/>
               {node.type !== "report" && node.type !== "display" && <button className="output-port port" aria-label={`从${node.title}开始连线`} onPointerDown={(event)=>startConnection(event,node.id)}/>} 
               <header><span className="node-type-icon">{node.type==="source"?"∿":node.type==="feature"?"ƒ":node.type==="peakSearch"?"⌃":node.type==="condition"?"?":node.type==="logic"?(node.logic==="AND"?"&":"≥1"):node.type==="display"?"▥":node.type==="report"?"W":"!"}</span><div><small>{node.type==="source"?"数据输入":node.type==="feature"?"信号处理":node.type==="peakSearch"?"频谱分析":node.type==="condition"?"条件判断":node.type==="logic"?"逻辑组合":node.type==="display"?"数据显示":node.type==="report"?"报告输出":"诊断输出"}</small><strong>{node.title}</strong></div><button className="node-delete" aria-label="删除节点" onClick={()=>removeNode(node.id)}>×</button></header>
@@ -717,9 +778,10 @@ export default function Home() {
               {node.type === "report" && (() => { const output=connectedOutputForReport(node.id); const ready=Boolean(output&&diagnosis); return <div className={`node-body report-body ${ready?"ready":""}`}><div><span>DOCX</span><small>{!output?"请连接诊断结果":diagnosis?"报告内容已就绪":"运行诊断后下载"}</small></div><button disabled={!ready} onClick={()=>downloadReport(node.id)}>↓ 下载 Word</button></div>; })()}
             </article>)}
           </div>
-          <div className="canvas-tip"><b>无限画布</b><span>拖动空白处平移 · Ctrl + 滚轮缩放 · 点击连线删除</span></div>
+          {selectionBox&&<div className="selection-marquee" style={selectionBox}>{selectedIds.length>0&&<span>{selectedIds.length} 个节点</span>}</div>}
+          <div className="canvas-tip"><b>无限画布</b><span>左键框选 · 滚轮拖动平移 · Ctrl + 滚轮缩放 · Delete 删除节点</span></div>
         </div>
-        {selectedNode && <div className="selection-chip"><span>已选择</span><b>{selectedNode.title}</b><small>位置 {Math.round(selectedNode.x)}, {Math.round(selectedNode.y)}</small></div>}
+        {selectedIds.length>0 && <div className="selection-chip"><span>已选择</span>{selectedNode?<><b>{selectedNode.title}</b><small>位置 {Math.round(selectedNode.x)}, {Math.round(selectedNode.y)} · Delete 删除</small></>:<><b>{selectedIds.length} 个节点</b><small>按 Delete 批量删除</small></>}</div>}
       </section>
     </div>
     {toast && <div className="toast">{toast}</div>}
