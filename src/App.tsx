@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { downloadHistory, historyConfigured, listHistory, saveHistory, type HistoryRecord } from "./historyApi";
 
 type SpectrumPoint = { f: number; a: number };
 type MetricKey = "rms" | "peak" | "kurtosis" | "crest" | "bpfo";
@@ -28,7 +29,8 @@ type CanvasView = { x: number; y: number; scale: number };
 type SelectionBox = { left: number; top: number; width: number; height: number };
 type PeakResult = SpectrumPoint & { order?: number; theoretical?: number };
 type PeakSearchResult = { peaks: PeakResult[]; energyPercent: number; bandPointCount: number };
-type SourceSignal = { fileName: string; samples: number[]; revision: number };
+type SourceSignal = { fileName: string; samples: number[]; revision: number; historyId?: string };
+type SidebarMode = "nodes" | "history";
 type MetricSet = Record<MetricKey, number>;
 type RunResults = {
   sourceIdByNode: Map<string, string>;
@@ -319,6 +321,12 @@ export default function Home() {
   const [isPanning, setIsPanning] = useState(false);
   const [selectionBox, setSelectionBox] = useState<SelectionBox | null>(null);
   const [previewNodeId, setPreviewNodeId] = useState<string | null>(null);
+  const [sidebarMode, setSidebarMode] = useState<SidebarMode>("nodes");
+  const [historyRecords, setHistoryRecords] = useState<HistoryRecord[]>([]);
+  const [historySearch, setHistorySearch] = useState("");
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState("");
+  const [historyRefresh, setHistoryRefresh] = useState(0);
   const canvasViewportRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ id: string; dx: number; dy: number } | null>(null);
   const linkRef = useRef<{ source: string } | null>(null);
@@ -339,6 +347,22 @@ export default function Home() {
     setRunResults(null);
     setDiagnosis(null);
   }, [calculationKey]);
+
+  useEffect(() => {
+    if (!historyConfigured) return;
+    const timer = window.setTimeout(async () => {
+      setHistoryLoading(true);
+      setHistoryError("");
+      try {
+        setHistoryRecords(await listHistory(historySearch));
+      } catch {
+        setHistoryError("历史数据读取失败，请稍后重试");
+      } finally {
+        setHistoryLoading(false);
+      }
+    }, historySearch ? 280 : 0);
+    return () => window.clearTimeout(timer);
+  }, [historySearch, historyRefresh]);
 
   function connectNodes(source: string, target: string) {
     const sourceNode = nodes.find((node) => node.id === source);
@@ -500,7 +524,22 @@ export default function Home() {
       if (values.length < 64) throw new Error("too short");
       setSourceSignals((current) => ({ ...current, [sourceId]: { fileName: file.name, samples: values, revision: Date.now() } }));
       setDiagnosis(null); setRunResults(null);
-      notify(`${file.name}：已读取 ${values.length.toLocaleString()} 个数据点`);
+      if (!historyConfigured) {
+        notify(`${file.name}：已读取 ${values.length.toLocaleString()} 个数据点`);
+        return;
+      }
+      notify(`${file.name} 已载入，正在保存到历史数据`);
+      try {
+        const record = await saveHistory(file, { sampleCount: values.length, samplingFrequency: fs, rpm, bpfo });
+        setSourceSignals((current) => {
+          const signal = current[sourceId];
+          return signal ? { ...current, [sourceId]: { ...signal, historyId: record.id } } : current;
+        });
+        setHistoryRefresh((value) => value + 1);
+        notify(`${file.name} 已载入并保存到历史数据`);
+      } catch {
+        notify(`${file.name} 已载入，但云端历史保存失败`);
+      }
     } catch { notify("无法识别文件，请使用单列或“时间,幅值”格式"); }
   }
 
@@ -508,6 +547,26 @@ export default function Home() {
     const samples = generateDemo(fs, rpm, bpfo);
     setSourceSignals((current) => ({ ...current, [sourceId]: { fileName: `轴承外圈故障演示-${sourceId.slice(-4)}.txt`, samples, revision: Date.now() } }));
     setDiagnosis(null); setRunResults(null); notify("演示波形已载入当前节点");
+  }
+
+  async function loadHistoryIntoNode(record: HistoryRecord, sourceId: string) {
+    notify(`正在读取历史数据：${record.file_name}`);
+    try {
+      const values = parseTextSignal(await downloadHistory(record)).slice(0, 65536);
+      if (values.length < 64) throw new Error("too short");
+      setSourceSignals((current) => ({
+        ...current,
+        [sourceId]: { fileName: record.file_name, samples: values, revision: Date.now(), historyId: record.id },
+      }));
+      setFs(record.sampling_frequency || fs);
+      setRpm(record.rpm ?? rpm);
+      setBpfo(record.bpfo ?? bpfo);
+      setDiagnosis(null);
+      setRunResults(null);
+      notify(`${record.file_name} 已装载到振动波形节点，点击运行后计算`);
+    } catch {
+      notify("历史波形读取失败，请检查云端文件是否存在");
+    }
   }
 
   function startNodeDrag(event: React.PointerEvent, id: string) {
@@ -556,8 +615,20 @@ export default function Home() {
     setDraftLink(null);
   }
 
-  function addNodeFromPalette(event: React.DragEvent) {
+  function handleCanvasDrop(event: React.DragEvent) {
     event.preventDefault();
+    const historyId = event.dataTransfer.getData("application/x-vibrule-history");
+    if (historyId) {
+      const record = historyRecords.find((item) => item.id === historyId);
+      if (!record || !canvasViewportRef.current) return;
+      const point = screenToCanvas(event.clientX, event.clientY);
+      const id = `node-${Date.now()}`;
+      setNodes((current) => [...current, { id, type: "source", title: "振动波形", x: point.x - NODE_WIDTH / 2, y: point.y - PORT_Y }]);
+      setSelectedIds([id]);
+      setDiagnosis(null);
+      void loadHistoryIntoNode(record, id);
+      return;
+    }
     const payload = event.dataTransfer.getData("application/x-vibrule-node");
     if (!payload) return;
     const item = JSON.parse(payload) as { type: NodeType; title: string; metric?: MetricKey; logic?: "AND" | "OR" };
@@ -569,6 +640,15 @@ export default function Home() {
       : item.type === "display" ? { displayMode: "auto" } : {};
     setNodes((current) => [...current, { id, type: item.type, title: item.title, metric: item.metric, logic: item.logic, operator: ">", threshold: item.metric === "kurtosis" ? 3.5 : .2, x: point.x - NODE_WIDTH / 2, y: point.y - PORT_Y, ...specialDefaults }]);
     setSelectedIds([id]); setDiagnosis(null);
+  }
+
+  function handleHistoryDropOnSource(event: React.DragEvent, sourceId: string) {
+    const historyId = event.dataTransfer.getData("application/x-vibrule-history");
+    if (!historyId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const record = historyRecords.find((item) => item.id === historyId);
+    if (record) void loadHistoryIntoNode(record, sourceId);
   }
 
   function updateNode(id: string, change: Partial<FlowNode>) {
@@ -829,10 +909,23 @@ export default function Home() {
 
     <div className="flow-body">
       <aside className="node-palette">
-        <div className="palette-head"><h1>节点工具箱</h1><p>拖到右侧画布中使用</p></div>
-        <div className="source-import-tip"><span>1</span><div><strong>先拖入“振动波形”</strong><small>每个波形节点可独立导入一个 TXT / CSV 文件</small></div></div>
+        <div className="palette-head"><h1>{sidebarMode === "nodes" ? "节点工具箱" : "历史数据"}</h1><p>{sidebarMode === "nodes" ? "拖到右侧画布中使用" : "拖到画布或已有波形节点"}</p></div>
+        <div className="sidebar-tabs" role="tablist" aria-label="左侧面板">
+          <button role="tab" aria-selected={sidebarMode === "nodes"} className={sidebarMode === "nodes" ? "active" : ""} onClick={() => setSidebarMode("nodes")}>节点工具箱</button>
+          <button role="tab" aria-selected={sidebarMode === "history"} className={sidebarMode === "history" ? "active" : ""} onClick={() => setSidebarMode("history")}>历史数据</button>
+        </div>
+        {sidebarMode === "nodes" ? <div className="source-import-tip"><span>1</span><div><strong>先拖入“振动波形”</strong><small>每个波形节点可独立导入一个 TXT / CSV 文件</small></div></div> : <div className="source-import-tip history-tip"><span>↗</span><div><strong>拖入即可使用</strong><small>拖到空白处新建波形节点，拖到已有波形节点则替换其数据</small></div></div>}
         <div className="quick-params"><label>采样频率<input value={fs} type="number" onChange={(event) => {setFs(Number(event.target.value)||1);setDiagnosis(null);}}/><em>Hz</em></label><label>设备转速<input value={rpm} type="number" onChange={(event) => setRpm(Number(event.target.value)||0)}/><em>rpm</em></label><label>BPFO<input value={bpfo} type="number" step="0.1" onChange={(event) => {setBpfo(Number(event.target.value)||0);setDiagnosis(null);}}/><em>Hz</em></label></div>
-        <div className="palette-scroll">{palette.map((group) => <section key={group.group}><h2>{group.group}</h2>{group.items.map((item) => <div className="palette-node" key={`${item.type}-${item.title}`} draggable onDragStart={(event) => {event.dataTransfer.effectAllowed="copy";event.dataTransfer.setData("application/x-vibrule-node",JSON.stringify(item));}}><span>{item.icon}</span><div><strong>{item.title}</strong><small>{item.desc}</small></div><b>⠿</b></div>)}</section>)}</div>
+        {sidebarMode === "nodes" ? <div className="palette-scroll">{palette.map((group) => <section key={group.group}><h2>{group.group}</h2>{group.items.map((item) => <div className="palette-node" key={`${item.type}-${item.title}`} draggable onDragStart={(event) => {event.dataTransfer.effectAllowed="copy";event.dataTransfer.setData("application/x-vibrule-node",JSON.stringify(item));}}><span>{item.icon}</span><div><strong>{item.title}</strong><small>{item.desc}</small></div><b>⠿</b></div>)}</section>)}</div> : <div className="history-panel">
+          <div className="history-search"><span>⌕</span><input aria-label="搜索历史数据" value={historySearch} onChange={(event) => setHistorySearch(event.target.value)} placeholder="搜索文件名称"/></div>
+          {!historyConfigured && <div className="history-state"><span>☁</span><strong>等待连接云端数据库</strong><small>完成 Supabase 配置后，导入的真实波形会自动出现在这里。</small></div>}
+          {historyConfigured && historyLoading && <div className="history-state compact"><span>…</span><strong>正在读取历史数据</strong></div>}
+          {historyConfigured && !historyLoading && historyError && <div className="history-state error"><span>!</span><strong>{historyError}</strong><button onClick={() => setHistoryRefresh((value) => value + 1)}>重新加载</button></div>}
+          {historyConfigured && !historyLoading && !historyError && !historyRecords.length && <div className="history-state"><span>∿</span><strong>{historySearch ? "没有匹配的数据" : "暂无历史数据"}</strong><small>{historySearch ? "换一个文件名关键词试试" : "在波形节点导入 TXT / CSV 后会自动保存"}</small></div>}
+          {historyConfigured && !historyLoading && !historyError && historyRecords.length > 0 && <div className="history-list">{historyRecords.map((record) => <div className="history-row" key={record.id} draggable onDragStart={(event) => {event.dataTransfer.effectAllowed="copy";event.dataTransfer.setData("application/x-vibrule-history",record.id);}} title="拖到画布空白处或已有振动波形节点">
+            <span className="history-wave">∿</span><div><strong>{record.file_name}</strong><small>{new Date(record.created_at).toLocaleString("zh-CN", {month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false})} · {record.sample_count.toLocaleString()} 点</small><em>{record.sampling_frequency.toLocaleString()} Hz · {record.rpm.toLocaleString()} rpm</em></div><b>⠿</b>
+          </div>)}</div>}
+        </div>}
       </aside>
 
       <section className="canvas-area">
@@ -850,7 +943,7 @@ export default function Home() {
           onPointerDown={startCanvasInteraction}
           onAuxClick={(event)=>event.preventDefault()}
           onDragOver={(event) => {event.preventDefault();event.dataTransfer.dropEffect="copy";}}
-          onDrop={addNodeFromPalette}
+          onDrop={handleCanvasDrop}
         >
           <div className="canvas-plane" style={{ transform: `translate(${canvasView.x}px, ${canvasView.y}px) scale(${canvasView.scale})` }}>
             <svg className="edge-layer" width="1" height="1">
@@ -862,11 +955,11 @@ export default function Home() {
               })}
               {draftLink && (() => { const source=nodeById.get(draftLink.source); if(!source)return null;const sx=source.x+NODE_WIDTH,sy=source.y+PORT_Y;return <path className="draft-edge" d={`M${sx},${sy} C${sx+80},${sy} ${draftLink.x-80},${draftLink.y} ${draftLink.x},${draftLink.y}`}/>; })()}
             </svg>
-            {nodes.map((node) => <article key={node.id} data-node-id={node.id} className={`flow-node ${node.type} ${selectedIds.includes(node.id)?"selected":""}`} style={{left:node.x,top:node.y}} onPointerDown={(event)=>startNodeDrag(event,node.id)} onClick={(event)=>{event.stopPropagation();setSelectedIds([node.id]);}}>
+            {nodes.map((node) => <article key={node.id} data-node-id={node.id} className={`flow-node ${node.type} ${selectedIds.includes(node.id)?"selected":""}`} style={{left:node.x,top:node.y}} onPointerDown={(event)=>startNodeDrag(event,node.id)} onClick={(event)=>{event.stopPropagation();setSelectedIds([node.id]);}} onDragOver={node.type === "source" ? (event) => {event.preventDefault();event.dataTransfer.dropEffect="copy";} : undefined} onDrop={node.type === "source" ? (event) => handleHistoryDropOnSource(event,node.id) : undefined}>
               <button className="input-port port" data-input-node={node.id} aria-label={`连接到${node.title}`} onPointerUp={(event)=>finishConnection(event,node.id)}/>
               {node.type !== "report" && node.type !== "display" && <button className="output-port port" aria-label={`从${node.title}开始连线`} onPointerDown={(event)=>startConnection(event,node.id)}/>} 
               <header><span className="node-type-icon">{node.type==="source"?"∿":node.type==="feature"?"ƒ":node.type==="peakSearch"?"⌃":node.type==="condition"?"?":node.type==="logic"?(node.logic==="AND"?"&":"≥1"):node.type==="display"?"▥":node.type==="report"?"W":"!"}</span><div><small>{node.type==="source"?"数据输入":node.type==="feature"?"信号处理":node.type==="peakSearch"?"频谱分析":node.type==="condition"?"条件判断":node.type==="logic"?"逻辑组合":node.type==="display"?"数据显示":node.type==="report"?"报告输出":"诊断输出"}</small><strong>{node.title}</strong></div><button className="node-delete" aria-label="删除节点" onClick={()=>removeNode(node.id)}>×</button></header>
-              {node.type === "source" && (()=>{const signal=sourceSignals[node.id];const calculated=Boolean(runResults&&(runResults.metricsBySource.has(node.id)||runResults.spectrumByNode.has(node.id)));return <div className="node-body source-node-body"><div className="source-wave-preview"><TinyWave samples={signal?.samples??[]}/><div><strong>{signal?.fileName??"未导入波形"}</strong><small>{signal?`${signal.samples.length.toLocaleString()} 点 · ${calculated?"已完成计算":"待运行计算"}`:"每个节点保存独立数据"}</small></div></div><div className="source-node-actions"><label><input type="file" accept=".txt,.csv" onChange={(event)=>{loadFile(node.id,event.target.files?.[0]);event.currentTarget.value="";}}/><span>＋ 导入波形</span></label><button onClick={()=>loadDemo(node.id)}>演示数据</button></div></div>;})()}
+              {node.type === "source" && (()=>{const signal=sourceSignals[node.id];const calculated=Boolean(runResults&&(runResults.metricsBySource.has(node.id)||runResults.spectrumByNode.has(node.id)));return <div className="node-body source-node-body"><div className="source-wave-preview"><TinyWave samples={signal?.samples??[]}/><div><strong>{signal?.fileName??"未导入波形"}</strong><small>{signal?`${signal.samples.length.toLocaleString()} 点 · ${calculated?"已完成计算":"待运行计算"}`:"可导入文件或接收历史数据"}</small></div></div><div className="source-node-actions"><label><input type="file" accept=".txt,.csv" onChange={(event)=>{loadFile(node.id,event.target.files?.[0]);event.currentTarget.value="";}}/><span>＋ 导入波形</span></label><button onClick={()=>loadDemo(node.id)}>演示数据</button></div>{signal?.historyId&&<div className="history-linked">☁ 已连接历史数据</div>}</div>;})()}
               {node.type === "feature" && node.metric && (()=>{const linked=connections.some((edge)=>edge.target===node.id);const value=runResults?.valueByNode.get(node.id);return <div className="node-body value-body"><span>{metricInfo[node.metric].label}</span><strong>{value===undefined?"—":value.toFixed(node.metric==="kurtosis"||node.metric==="crest"?2:3)}</strong><small>{!linked?"等待连接":!runResults?"点击运行诊断":value===undefined?"上游无波形":metricInfo[node.metric].unit}</small></div>;})()}
               {node.type === "peakSearch" && (() => {
                 const linked = connections.some((edge) => edge.target === node.id);
