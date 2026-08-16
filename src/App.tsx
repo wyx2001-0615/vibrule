@@ -327,6 +327,11 @@ export default function Home() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState("");
   const [historyRefresh, setHistoryRefresh] = useState(0);
+  const [pendingHistoryFiles, setPendingHistoryFiles] = useState<File[]>([]);
+  const [historySampleCount, setHistorySampleCount] = useState(4096);
+  const [historyMaxFrequency, setHistoryMaxFrequency] = useState(6400);
+  const [historyImporting, setHistoryImporting] = useState(false);
+  const [historyDropActive, setHistoryDropActive] = useState(false);
   const canvasViewportRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ id: string; dx: number; dy: number } | null>(null);
   const linkRef = useRef<{ source: string } | null>(null);
@@ -517,6 +522,52 @@ export default function Home() {
     window.setTimeout(() => setToast(""), 2300);
   }
 
+  function queueHistoryFiles(files: FileList | File[]) {
+    const supported = Array.from(files).filter((file) => /\.(txt|csv)$/i.test(file.name));
+    if (!supported.length) {
+      notify("请选择 TXT 或 CSV 波形文件");
+      return;
+    }
+    setPendingHistoryFiles((current) => {
+      const known = new Set(current.map((file) => `${file.name}-${file.size}-${file.lastModified}`));
+      return [...current, ...supported.filter((file) => !known.has(`${file.name}-${file.size}-${file.lastModified}`))];
+    });
+  }
+
+  async function importPendingHistory() {
+    if (!historyConfigured) { notify("历史数据服务尚未配置"); return; }
+    if (!pendingHistoryFiles.length) { notify("请先拖入或选择波形文件"); return; }
+    if (!Number.isFinite(historySampleCount) || historySampleCount < 64) { notify("采样点数不能小于 64"); return; }
+    if (!Number.isFinite(historyMaxFrequency) || historyMaxFrequency <= 0) { notify("请输入正确的最大分析频率"); return; }
+
+    setHistoryImporting(true);
+    let success = 0;
+    let failed = 0;
+    for (let index = 0; index < pendingHistoryFiles.length; index++) {
+      const file = pendingHistoryFiles[index];
+      notify(`正在导入 ${index + 1}/${pendingHistoryFiles.length}：${file.name}`);
+      try {
+        const values = parseTextSignal(await file.text());
+        if (values.length < 64) throw new Error("too short");
+        await saveHistory(file, {
+          sampleCount: Math.round(historySampleCount),
+          samplingFrequency: historyMaxFrequency * 2,
+          rpm,
+          bpfo,
+        });
+        success++;
+      } catch {
+        failed++;
+      }
+    }
+    setHistoryImporting(false);
+    if (success) {
+      setPendingHistoryFiles([]);
+      setHistoryRefresh((value) => value + 1);
+    }
+    notify(failed ? `导入完成：成功 ${success} 个，失败 ${failed} 个` : `已导入 ${success} 个历史波形`);
+  }
+
   async function loadFile(sourceId: string, file?: File) {
     if (!file) return;
     try {
@@ -524,22 +575,7 @@ export default function Home() {
       if (values.length < 64) throw new Error("too short");
       setSourceSignals((current) => ({ ...current, [sourceId]: { fileName: file.name, samples: values, revision: Date.now() } }));
       setDiagnosis(null); setRunResults(null);
-      if (!historyConfigured) {
-        notify(`${file.name}：已读取 ${values.length.toLocaleString()} 个数据点`);
-        return;
-      }
-      notify(`${file.name} 已载入，正在保存到历史数据`);
-      try {
-        const record = await saveHistory(file, { sampleCount: values.length, samplingFrequency: fs, rpm, bpfo });
-        setSourceSignals((current) => {
-          const signal = current[sourceId];
-          return signal ? { ...current, [sourceId]: { ...signal, historyId: record.id } } : current;
-        });
-        setHistoryRefresh((value) => value + 1);
-        notify(`${file.name} 已载入并保存到历史数据`);
-      } catch {
-        notify(`${file.name} 已载入，但云端历史保存失败`);
-      }
+      notify(`${file.name}：已载入 ${values.length.toLocaleString()} 个数据点，不会自动保存到历史库`);
     } catch { notify("无法识别文件，请使用单列或“时间,幅值”格式"); }
   }
 
@@ -552,7 +588,7 @@ export default function Home() {
   async function loadHistoryIntoNode(record: HistoryRecord, sourceId: string) {
     notify(`正在读取历史数据：${record.file_name}`);
     try {
-      const values = parseTextSignal(await downloadHistory(record)).slice(0, 65536);
+      const values = parseTextSignal(await downloadHistory(record)).slice(0, Math.min(65536, record.sample_count || 65536));
       if (values.length < 64) throw new Error("too short");
       setSourceSignals((current) => ({
         ...current,
@@ -914,23 +950,32 @@ export default function Home() {
           <button role="tab" aria-selected={sidebarMode === "nodes"} className={sidebarMode === "nodes" ? "active" : ""} onClick={() => setSidebarMode("nodes")}>节点工具箱</button>
           <button role="tab" aria-selected={sidebarMode === "history"} className={sidebarMode === "history" ? "active" : ""} onClick={() => setSidebarMode("history")}>历史数据</button>
         </div>
-        {sidebarMode === "nodes" ? <div className="source-import-tip"><span>1</span><div><strong>先拖入“振动波形”</strong><small>每个波形节点可独立导入一个 TXT / CSV 文件</small></div></div> : <div className="source-import-tip history-tip"><span>↗</span><div><strong>拖入即可使用</strong><small>拖到空白处新建波形节点，拖到已有波形节点则替换其数据</small></div></div>}
-        <div className="quick-params"><label>采样频率<input value={fs} type="number" onChange={(event) => {setFs(Number(event.target.value)||1);setDiagnosis(null);}}/><em>Hz</em></label><label>设备转速<input value={rpm} type="number" onChange={(event) => setRpm(Number(event.target.value)||0)}/><em>rpm</em></label><label>BPFO<input value={bpfo} type="number" step="0.1" onChange={(event) => {setBpfo(Number(event.target.value)||0);setDiagnosis(null);}}/><em>Hz</em></label></div>
+        {sidebarMode === "nodes" && <><div className="source-import-tip"><span>1</span><div><strong>先拖入“振动波形”</strong><small>每个波形节点可独立导入一个 TXT / CSV 文件</small></div></div><div className="quick-params"><label>采样频率<input value={fs} type="number" onChange={(event) => {setFs(Number(event.target.value)||1);setDiagnosis(null);}}/><em>Hz</em></label><label>设备转速<input value={rpm} type="number" onChange={(event) => setRpm(Number(event.target.value)||0)}/><em>rpm</em></label></div></>}
         {sidebarMode === "nodes" ? <div className="palette-scroll">{palette.map((group) => <section key={group.group}><h2>{group.group}</h2>{group.items.map((item) => <div className="palette-node" key={`${item.type}-${item.title}`} draggable onDragStart={(event) => {event.dataTransfer.effectAllowed="copy";event.dataTransfer.setData("application/x-vibrule-node",JSON.stringify(item));}}><span>{item.icon}</span><div><strong>{item.title}</strong><small>{item.desc}</small></div><b>⠿</b></div>)}</section>)}</div> : <div className="history-panel">
+          <section className="history-import-card">
+            <label className={`history-drop-zone ${historyDropActive ? "active" : ""}`} onDragEnter={(event)=>{event.preventDefault();setHistoryDropActive(true);}} onDragOver={(event)=>event.preventDefault()} onDragLeave={(event)=>{if(!event.currentTarget.contains(event.relatedTarget as Node))setHistoryDropActive(false);}} onDrop={(event)=>{event.preventDefault();setHistoryDropActive(false);queueHistoryFiles(event.dataTransfer.files);}}>
+              <input type="file" accept=".txt,.csv" multiple onChange={(event)=>{if(event.target.files)queueHistoryFiles(event.target.files);event.currentTarget.value="";}}/>
+              <span>＋</span><div><strong>拖入或选择波形文件</strong><small>支持多个 TXT / CSV，共用下方参数</small></div>
+            </label>
+            {pendingHistoryFiles.length > 0 && <div className="history-file-summary"><span>已选择 {pendingHistoryFiles.length} 个文件</span><button onClick={()=>setPendingHistoryFiles([])} disabled={historyImporting}>清空</button><small>{pendingHistoryFiles.slice(0,3).map((file)=>file.name).join("、")}{pendingHistoryFiles.length>3?` 等 ${pendingHistoryFiles.length} 个`:""}</small></div>}
+            <div className="history-import-params"><label>采样点数<input aria-label="历史数据采样点数" type="number" min="64" step="1" value={historySampleCount} onChange={(event)=>setHistorySampleCount(Number(event.target.value))}/><em>点</em></label><label>最大分析频率<input aria-label="历史数据最大分析频率" type="number" min="1" step="1" value={historyMaxFrequency} onChange={(event)=>setHistoryMaxFrequency(Number(event.target.value))}/><em>Hz</em></label></div>
+            <button className="history-import-button" onClick={importPendingHistory} disabled={historyImporting || !pendingHistoryFiles.length}>{historyImporting ? "正在导入…" : `确认导入${pendingHistoryFiles.length ? `（${pendingHistoryFiles.length}）` : ""}`}</button>
+            <small className="history-import-note">点击确认前，文件不会进入历史数据</small>
+          </section>
           <div className="history-search"><span>⌕</span><input aria-label="搜索历史数据" value={historySearch} onChange={(event) => setHistorySearch(event.target.value)} placeholder="搜索文件名称"/></div>
           {!historyConfigured && <div className="history-state"><span>☁</span><strong>等待连接云端数据库</strong><small>完成 Supabase 配置后，导入的真实波形会自动出现在这里。</small></div>}
           {historyConfigured && historyLoading && <div className="history-state compact"><span>…</span><strong>正在读取历史数据</strong></div>}
           {historyConfigured && !historyLoading && historyError && <div className="history-state error"><span>!</span><strong>{historyError}</strong><button onClick={() => setHistoryRefresh((value) => value + 1)}>重新加载</button></div>}
-          {historyConfigured && !historyLoading && !historyError && !historyRecords.length && <div className="history-state"><span>∿</span><strong>{historySearch ? "没有匹配的数据" : "暂无历史数据"}</strong><small>{historySearch ? "换一个文件名关键词试试" : "在波形节点导入 TXT / CSV 后会自动保存"}</small></div>}
+          {historyConfigured && !historyLoading && !historyError && !historyRecords.length && <div className="history-state"><span>∿</span><strong>{historySearch ? "没有匹配的数据" : "暂无历史数据"}</strong><small>{historySearch ? "换一个文件名关键词试试" : "从上方选择文件并确认导入"}</small></div>}
           {historyConfigured && !historyLoading && !historyError && historyRecords.length > 0 && <div className="history-list">{historyRecords.map((record) => <div className="history-row" key={record.id} draggable onDragStart={(event) => {event.dataTransfer.effectAllowed="copy";event.dataTransfer.setData("application/x-vibrule-history",record.id);}} title="拖到画布空白处或已有振动波形节点">
-            <span className="history-wave">∿</span><div><strong>{record.file_name}</strong><small>{new Date(record.created_at).toLocaleString("zh-CN", {month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false})} · {record.sample_count.toLocaleString()} 点</small><em>{record.sampling_frequency.toLocaleString()} Hz · {record.rpm.toLocaleString()} rpm</em></div><b>⠿</b>
+            <span className="history-wave">∿</span><div><strong>{record.file_name}</strong><small>{new Date(record.created_at).toLocaleString("zh-CN", {month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false})} · {record.sample_count.toLocaleString()} 点</small><em>最大分析频率 {(record.sampling_frequency / 2).toLocaleString()} Hz</em></div><b>⠿</b>
           </div>)}</div>}
         </div>}
       </aside>
 
       <section className="canvas-area">
         <div className="canvas-toolbar">
-          <div className="canvas-title"><strong>外圈故障诊断流程</strong><span>左键拖动框选节点 · 按住滚轮平移画布 · 拖动端口自由连线</span></div>
+          <div className="canvas-title"><span>左键拖动框选节点 · 按住滚轮平移画布 · 拖动端口自由连线</span></div>
           <div className="canvas-tools">
             <div className="legend"><span><i className="source-dot"/>数据</span><span><i className="feature-dot"/>计算</span><span><i className="condition-dot"/>条件</span><span><i className="output-dot"/>输出</span><span><i className="report-dot"/>报告</span></div>
             <div className="zoom-control"><button aria-label="缩小画布" onClick={() => zoomCanvas(canvasView.scale - .1)}>−</button><button className="zoom-value" onClick={() => setCanvasView(INITIAL_VIEW)}>{Math.round(canvasView.scale * 100)}%</button><button aria-label="放大画布" onClick={() => zoomCanvas(canvasView.scale + .1)}>＋</button><button className="view-reset" onClick={() => setCanvasView(INITIAL_VIEW)}>复位</button></div>
