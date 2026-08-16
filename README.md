@@ -1,4 +1,4 @@
-# VibRule 独立部署版
+# Watch 独立部署版
 
 这是低代码振动信号故障诊断平台的独立 React/Vite 版本，不依赖 ChatGPT，也不调用 GPT API。
 
