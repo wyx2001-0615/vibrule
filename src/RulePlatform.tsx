@@ -381,8 +381,8 @@ export default function RulePlatform() {
       const {Document,Packer,Paragraph,TextRun,HeadingLevel,Table,TableCell,TableRow,WidthType}=await import("docx");
       const rows=nodes.filter((item)=>runResults.values.has(item.id)&&item.kind!=="display"&&item.kind!=="report").map((item)=>[item.title,summarizeValue(runResults.values.get(item.id)).primary,summarizeValue(runResults.values.get(item.id)).secondary]).slice(0,120);
       const cell=(text:string,bold=false)=>new TableCell({children:[new Paragraph({children:[new TextRun({text,bold,font:"Microsoft YaHei"})]})]});
-      const doc=new Document({sections:[{children:[new Paragraph({text:"VibRule 轴承故障自主判别报告",heading:HeadingLevel.TITLE}),new Paragraph({children:[new TextRun({text:`生成时间：${new Date().toLocaleString("zh-CN",{hour12:false})}`,font:"Microsoft YaHei"})]}),new Paragraph({text:"诊断结论",heading:HeadingLevel.HEADING_1}),...conclusions.map((item)=>new Paragraph({children:[new TextRun({text:item.resultText??item.title,bold:true,color:"B42318",font:"Microsoft YaHei"})]})),new Paragraph({text:"节点计算明细",heading:HeadingLevel.HEADING_1}),new Table({width:{size:100,type:WidthType.PERCENTAGE},rows:[new TableRow({children:[cell("节点",true),cell("结果",true),cell("说明",true)]}),...rows.map((row)=>new TableRow({children:row.map((value)=>cell(value))}))]})]}]});
-      const blob=await Packer.toBlob(doc),url=URL.createObjectURL(blob),link=document.createElement("a");link.href=url;link.download=`VibRule_轴承自主判别_${new Date().toISOString().replace(/[-:]/g,"").slice(0,15).replace("T","_")}.docx`;document.body.appendChild(link);link.click();link.remove();window.setTimeout(()=>URL.revokeObjectURL(url),1500);notify("Word诊断报告已生成");
+      const doc=new Document({sections:[{children:[new Paragraph({text:"Watch 轴承故障自主判别报告",heading:HeadingLevel.TITLE}),new Paragraph({children:[new TextRun({text:`生成时间：${new Date().toLocaleString("zh-CN",{hour12:false})}`,font:"Microsoft YaHei"})]}),new Paragraph({text:"诊断结论",heading:HeadingLevel.HEADING_1}),...conclusions.map((item)=>new Paragraph({children:[new TextRun({text:item.resultText??item.title,bold:true,color:"B42318",font:"Microsoft YaHei"})]})),new Paragraph({text:"节点计算明细",heading:HeadingLevel.HEADING_1}),new Table({width:{size:100,type:WidthType.PERCENTAGE},rows:[new TableRow({children:[cell("节点",true),cell("结果",true),cell("说明",true)]}),...rows.map((row)=>new TableRow({children:row.map((value)=>cell(value))}))]})]}]});
+      const blob=await Packer.toBlob(doc),url=URL.createObjectURL(blob),link=document.createElement("a");link.href=url;link.download=`Watch_轴承自主判别_${new Date().toISOString().replace(/[-:]/g,"").slice(0,15).replace("T","_")}.docx`;document.body.appendChild(link);link.click();link.remove();window.setTimeout(()=>URL.revokeObjectURL(url),1500);notify("Word诊断报告已生成");
     }catch{notify("报告生成失败，请重新尝试");}
   }
 
@@ -432,7 +432,7 @@ export default function RulePlatform() {
 
   return <main className="flow-app">
     <header className="flow-header">
-      <div className="flow-brand"><span>∿</span><div><strong>VibRule</strong><small>工业振动规则诊断平台</small></div></div>
+      <div className="flow-brand"><span>∿</span><div><strong>Watch</strong></div></div>
       <div className="flow-actions"><span className="data-state"><i className={loadedSourceNodes.length?"ready":""}/>{loadedSourceNodes.length?`${loadedSourceNodes.length} 个波形 · ${loadedPointCount.toLocaleString()} 点`:"实例需要正常/故障两组波形"}</span><button className="ghost-button" onClick={restoreExample}>恢复实例</button><button className="ghost-button example-data-button" onClick={loadExampleData}>载入实例数据</button><button className="ghost-button" onClick={()=>setConnections([])}>清空连线</button><button className="ghost-button clear-canvas-button" onClick={clearCanvas}>清空画布</button><button className="run-button" onClick={runDiagnosis}>▶ 运行诊断</button></div>
     </header>
     <div className="flow-body">
