@@ -33,7 +33,7 @@ export type ValueType =
 
 export type RuntimeValue =
   | { type: "number"; data: number; unit?: string }
-  | { type: "boolean"; data: boolean }
+  | { type: "boolean"; data: boolean; value?: number; detail?: string }
   | { type: "waveform"; data: WaveformData }
   | { type: "spectrum"; data: SpectrumPoint[] }
   | { type: "numbers"; data: number[]; unit?: string }
@@ -78,6 +78,14 @@ export type NodeKind =
   | "slidingEnergy"
   | "bandConstruct"
   | "frequencyMatch"
+  | "metricRatioCompare"
+  | "rotationFrequency"
+  | "candidateScreen"
+  | "differenceBands"
+  | "envelopeSpectrum"
+  | "cageSearch"
+  | "spectrumPresence"
+  | "integerRelation"
   | "display"
   | "output"
   | "report";
@@ -114,6 +122,15 @@ export type FlowNode = {
   windowHz?: number;
   stepHz?: number;
   highpassHz?: number;
+  bandMultiplier?: number;
+  excludeEndOrder?: number;
+  halfWidthHz?: number;
+  primaryRatio?: number;
+  fallbackRatio?: number;
+  minHits?: number;
+  minOrder?: number;
+  maxOrder?: number;
+  deviationLimit?: number;
   displayMode?: "auto" | "waveform" | "spectrum" | "value" | "list";
   resultText?: string;
 };
@@ -168,12 +185,30 @@ export const nodeMeta: Record<NodeKind, { icon: string; label: string }> = {
   slidingEnergy: { icon: "▰", label: "频谱分析" },
   bandConstruct: { icon: "↔", label: "频谱分析" },
   frequencyMatch: { icon: "◎", label: "频谱分析" },
+  metricRatioCompare: { icon: "R⇄", label: "组合模块" },
+  rotationFrequency: { icon: "fr", label: "组合模块" },
+  candidateScreen: { icon: "F?", label: "组合模块" },
+  differenceBands: { icon: "ΔB", label: "组合模块" },
+  envelopeSpectrum: { icon: "ENV", label: "组合模块" },
+  cageSearch: { icon: "fc", label: "组合模块" },
+  spectrumPresence: { icon: "✓f", label: "组合模块" },
+  integerRelation: { icon: "n×", label: "组合模块" },
   display: { icon: "▥", label: "数据显示" },
   output: { icon: "!", label: "诊断输出" },
   report: { icon: "W", label: "报告输出" },
 };
 
 export const palette: { group: string; items: PaletteItem[] }[] = [
+  { group: "常用组合模块", items: [
+    { kind: "metricRatioCompare", family: "metric", title: "双工况指标比较", icon: "R⇄", desc: "指标比值 + 阈值判断", defaults: { metric: "rms", compareOp: ">" } },
+    { kind: "rotationFrequency", family: "signal", title: "转频识别", icon: "fr", desc: "积分 + 频谱 + 谐波组", defaults: { highpassHz: 2, minProminence: 1.18, minDistanceHz: 2, maxPeaks: 60, harmonicOrders: "1,2,3", toleranceHz: 1.8 } },
+    { kind: "candidateScreen", family: "spectrum", title: "候选频率筛选", icon: "F?", desc: "限频 + 剔除转频 + 双阈值", defaults: { bandMultiplier: 10, excludeEndOrder: 30, minProminence: 1.12, minDistanceHz: 1, maxPeaks: 120, toleranceHz: 1.5, windowHz: 3 } },
+    { kind: "differenceBands", family: "spectrum", title: "差谱选带", icon: "ΔB", desc: "差谱 + 能量排序 + 频带", defaults: { windowHz: 120, stepHz: 40, count: 3, halfWidthHz: 120, minProminence: 1.05, minDistanceHz: 80, maxPeaks: 12 } },
+    { kind: "envelopeSpectrum", family: "signal", title: "多频带包络谱", icon: "ENV", desc: "带通 + 希尔伯特 + FFT" },
+    { kind: "cageSearch", family: "spectrum", title: "保持架频率搜索", icon: "fc", desc: "0.6/0.4fr 自动回退", defaults: { primaryRatio: 0.6, fallbackRatio: 0.4, halfWidthHz: 2, minProminence: 1.08, minDistanceHz: 0.5, maxPeaks: 20 } },
+    { kind: "spectrumPresence", family: "condition", title: "多频谱频率验证", icon: "✓f", desc: "跨频带寻峰并统计命中", defaults: { toleranceHz: 2, minHits: 2 } },
+    { kind: "integerRelation", family: "condition", title: "整数倍双向互证", icon: "n×", desc: "倍数偏差 + 阶次范围 + 反向峰", defaults: { deviationLimit: 0.1, minOrder: 6, maxOrder: 12, toleranceHz: 2 } },
+  ] },
   { group: "数据输入", items: [
     { kind: "source", family: "source", title: "振动波形", icon: "∿", desc: "TXT / CSV" },
     { kind: "constant", family: "math", title: "常数值", icon: "C", desc: "名称 / 数值 / 单位", defaults: { numberValue: 1, unit: "—" } },
@@ -257,6 +292,14 @@ export function inputPorts(node: FlowNode): InputPort[] {
     case "bandConstruct": return [{ key: "centers", label: "中心" }, { key: "width", label: "半带宽" }];
     case "frequencyMatch": return [{ key: "spectrum", label: "频谱" }, { key: "targets", label: "目标" }, { key: "tolerance", label: "容差", optional: true }];
     case "report": return [{ key: "results", label: "结论", multi: true }];
+    case "metricRatioCompare": return [{ key: "normal", label: "正常" }, { key: "fault", label: "故障" }, { key: "threshold", label: "阈值" }];
+    case "rotationFrequency": return [{ key: "waveform", label: "波形" }];
+    case "candidateScreen": return [{ key: "spectrum", label: "频谱" }, { key: "fr", label: "转频" }, { key: "energyThreshold", label: "能量阈值" }, { key: "contrastThreshold", label: "对比阈值" }];
+    case "differenceBands": return [{ key: "normalSpectrum", label: "正常谱" }, { key: "faultSpectrum", label: "故障谱" }, { key: "halfWidth", label: "半带宽", optional: true }];
+    case "envelopeSpectrum": return [{ key: "waveform", label: "波形" }, { key: "bands", label: "频带" }];
+    case "cageSearch": return [{ key: "spectra", label: "包络谱" }, { key: "fr", label: "转频" }];
+    case "spectrumPresence": return [{ key: "spectra", label: "频谱" }, { key: "targets", label: "目标频率" }, { key: "minHits", label: "最少命中", optional: true }];
+    case "integerRelation": return [{ key: "candidates", label: "候选" }, { key: "base", label: "基频" }, { key: "pairedBase", label: "互证基频" }, { key: "spectra", label: "互证频谱" }, { key: "cross", label: "跨频带" }];
   }
 }
 
@@ -275,163 +318,58 @@ function edge(source: string, target: string, targetPort = "input"): Connection 
 }
 
 export const exampleNodes: FlowNode[] = [
-  node("normal", "source", "source", "正常工况波形", 0, 40),
-  node("fault", "source", "source", "疑似故障波形", 0, 270),
-  node("rms-n", "metric", "metric", "正常 RMS", 270, 0, { metric: "rms" }),
-  node("rms-f", "metric", "metric", "故障 RMS", 270, 150, { metric: "rms" }),
-  node("rms-ratio", "math", "math", "RMS 比值 a", 520, 70, { operation: "/" }),
-  node("th-a", "constant", "math", "阈值 th_a", 520, 245, { numberValue: 1.2, unit: "—" }),
-  node("cmp-a", "compare", "condition", "a > th_a", 770, 105, { compareOp: ">" }),
-  node("kurt-n", "metric", "metric", "正常峭度", 270, 340, { metric: "kurtosis" }),
-  node("kurt-f", "metric", "metric", "故障峭度", 270, 490, { metric: "kurtosis" }),
-  node("kurt-ratio", "math", "math", "峭度比值 b", 520, 410, { operation: "/" }),
-  node("th-b", "constant", "math", "阈值 th_b", 520, 585, { numberValue: 1.25, unit: "—" }),
-  node("cmp-b", "compare", "condition", "b > th_b", 770, 445, { compareOp: ">" }),
-  node("initial-and", "logic", "condition", "时域条件均满足", 1020, 275, { logic: "AND" }),
-  node("fault-gate", "gate", "condition", "时域初筛条件门", 1270, 275),
+  node("normal", "source", "source", "正常工况波形", 0, 80),
+  node("fault", "source", "source", "疑似故障波形", 0, 360),
+  node("th-a", "constant", "math", "阈值 th_a", 270, 40, { numberValue: 1.2, unit: "—" }),
+  node("rms-check", "metricRatioCompare", "metric", "RMS 比值初筛", 540, 80, { metric: "rms", compareOp: ">" }),
+  node("th-b", "constant", "math", "阈值 th_b", 270, 470, { numberValue: 1.25, unit: "—" }),
+  node("kurt-check", "metricRatioCompare", "metric", "峭度比值初筛", 540, 360, { metric: "kurtosis", compareOp: ">" }),
+  node("initial-and", "logic", "condition", "时域条件均满足", 810, 240, { logic: "AND" }),
+  node("fault-gate", "gate", "condition", "时域初筛条件门", 1080, 240),
 
-  node("integrate", "integrate", "signal", "加速度转速度", 0, 790, { highpassHz: 2 }),
-  node("fft-vel", "fft", "signal", "速度频谱", 250, 790),
-  node("peaks-vel", "peakDetect", "spectrum", "速度谱峰值", 500, 790, { minProminence: 1.18, minDistanceHz: 2, maxPeaks: 60 }),
-  node("harmonic-groups", "harmonicSearch", "spectrum", "1×2×3×谐波组", 750, 790, { harmonicOrders: "1,2,3", toleranceHz: 1.8 }),
-  node("fr", "listItem", "list", "转频 fr", 1000, 790, { index: 0, unit: "Hz" }),
+  node("fr", "rotationFrequency", "signal", "转频 fr", 1360, 40, { highpassHz: 2, minProminence: 1.18, minDistanceHz: 2, maxPeaks: 60, harmonicOrders: "1,2,3", toleranceHz: 1.8 }),
+  node("fft-fault", "fft", "signal", "故障原始频谱", 1360, 350),
+  node("th-c", "constant", "math", "阈值 th_c", 1360, 600, { numberValue: 0.003, unit: "比例" }),
+  node("th-e", "constant", "math", "阈值 th_e", 1360, 760, { numberValue: 1.35, unit: "倍" }),
+  node("f-list", "candidateScreen", "spectrum", "候选故障频率 F_list", 1640, 400, { bandMultiplier: 10, excludeEndOrder: 30, minProminence: 1.12, minDistanceHz: 1, maxPeaks: 120, toleranceHz: 1.5, windowHz: 3 }),
+  node("display-candidates", "display", "display", "候选频率显示", 1910, 480, { displayMode: "list" }),
 
-  node("fft-fault", "fft", "signal", "故障原始频谱", 0, 1130),
-  node("zero", "constant", "math", "频段下限 0", 250, 1000, { numberValue: 0, unit: "Hz" }),
-  node("ten", "constant", "math", "上限倍数 10", 250, 1130, { numberValue: 10, unit: "×" }),
-  node("ten-fr", "math", "math", "10 × fr", 500, 1050, { operation: "*" }),
-  node("fault-band", "bandSlice", "spectrum", "截取 0～10fr", 750, 1110),
-  node("peaks-fault", "peakDetect", "spectrum", "候选局部峰值", 1000, 1110, { minProminence: 1.12, minDistanceHz: 1, maxPeaks: 120 }),
-  node("shaft-harmonics", "harmonicSequence", "spectrum", "1～30倍转频", 750, 1310, { startOrder: 1, endOrder: 30 }),
-  node("tol-shaft", "constant", "math", "转频剔除容差", 1000, 1310, { numberValue: 1.5, unit: "Hz" }),
-  node("exclude-shaft", "frequencyExclude", "spectrum", "剔除转频倍频", 1250, 1160, { toleranceHz: 1.5 }),
-  node("total-energy", "totalEnergy", "spectrum", "0～10fr总能量", 1000, 1480),
-  node("energy-ratio", "peakEnergyRatio", "spectrum", "单峰能量占比", 1500, 1080),
-  node("th-c", "constant", "math", "阈值 th_c", 1500, 1280, { numberValue: 0.003, unit: "比例" }),
-  node("cmp-c", "compare", "condition", "能量占比 > th_c", 1750, 1110, { compareOp: ">" }),
-  node("three-hz", "constant", "math", "左右频宽", 1500, 1460, { numberValue: 3, unit: "Hz" }),
-  node("contrast", "localContrast", "spectrum", "左右 3Hz 背景对比", 1750, 1390, { windowHz: 3 }),
-  node("th-e", "constant", "math", "阈值 th_e", 1750, 1580, { numberValue: 1.35, unit: "倍" }),
-  node("cmp-e", "compare", "condition", "局部对比 > th_e", 2000, 1400, { compareOp: ">" }),
-  node("candidate-mask", "logic", "condition", "候选条件 AND", 2250, 1230, { logic: "AND" }),
-  node("f-list", "listFilter", "list", "候选频率 F_list", 2500, 1230),
+  node("fft-normal", "fft", "signal", "正常原始频谱", 1360, 980),
+  node("demod-width", "constant", "math", "解调半带宽 d", 1640, 1160, { numberValue: 120, unit: "Hz" }),
+  node("band-list", "differenceBands", "spectrum", "差谱高能解调频带", 1910, 920, { windowHz: 120, stepHz: 40, count: 3, halfWidthHz: 120, minProminence: 1.05, minDistanceHz: 80, maxPeaks: 12 }),
+  node("fft-envelope", "envelopeSpectrum", "signal", "多频带包络谱", 2180, 900),
+  node("display-env", "display", "display", "包络谱显示", 2450, 1100, { displayMode: "spectrum" }),
+  node("cage", "cageSearch", "spectrum", "保持架频率搜索", 2450, 780, { primaryRatio: 0.6, fallbackRatio: 0.4, halfWidthHz: 2, minProminence: 1.08, minDistanceHz: 0.5, maxPeaks: 20 }),
+  node("fc-in", "listItem", "list", "保持架对内频率 fc_in", 2720, 680, { index: 0, unit: "Hz" }),
+  node("fc-out", "listItem", "list", "保持架对外频率 fc_out", 2720, 900, { index: 1, unit: "Hz" }),
+  node("fc-targets", "listMerge", "list", "fc_in / fc_out", 2990, 730),
+  node("cross-ok", "spectrumPresence", "condition", "跨频带保持架验证", 3260, 730, { toleranceHz: 2, minHits: 2 }),
 
-  node("fft-normal", "fft", "signal", "正常原始频谱", 0, 1780),
-  node("align", "alignSpectrum", "spectrum", "正常/故障频谱对齐", 250, 1730),
-  node("aligned-normal", "listItem", "list", "对齐正常频谱", 500, 1660, { index: 0 }),
-  node("aligned-fault", "listItem", "list", "对齐故障频谱", 500, 1830, { index: 1 }),
-  node("subtract-spectrum", "math", "math", "故障谱 − 正常谱", 750, 1730, { operation: "-" }),
-  node("diff-spectrum", "absolute", "math", "差谱绝对值", 1000, 1730),
-  node("band-window", "constant", "math", "能量窗宽", 1000, 1910, { numberValue: 120, unit: "Hz" }),
-  node("band-step", "constant", "math", "滑动步长", 1000, 2040, { numberValue: 40, unit: "Hz" }),
-  node("sliding-energy", "slidingEnergy", "spectrum", "差谱滑动能量", 1250, 1770, { windowHz: 120, stepHz: 40 }),
-  node("energy-bands", "peakDetect", "spectrum", "能量频带峰值", 1500, 1770, { minProminence: 1.05, minDistanceHz: 80, maxPeaks: 12 }),
-  node("sort-bands", "listSort", "list", "频带能量降序", 1750, 1770, { sortDirection: "desc", sortField: "amplitude" }),
-  node("top3", "topN", "list", "最高 3 个频带", 2000, 1770, { count: 3 }),
-  node("top-count", "constant", "math", "频带数量上限", 2000, 1940, { numberValue: 3, unit: "个" }),
-  node("band-centers", "fieldExtract", "list", "提取中心频率", 2250, 1770, { selectField: "frequency" }),
-  node("demod-width", "constant", "math", "解调半带宽 d", 2250, 1940, { numberValue: 120, unit: "Hz" }),
-  node("band-list", "bandConstruct", "spectrum", "解调频带 Band_List", 2500, 1770),
-
-  node("bandpass", "bandpass", "signal", "多频带带通滤波", 0, 2240),
-  node("envelope", "hilbert", "signal", "希尔伯特包络", 250, 2240),
-  node("fft-envelope", "fft", "signal", "多频段包络谱", 500, 2240),
-  node("c06", "constant", "math", "系数 0.6", 750, 2110, { numberValue: 0.6, unit: "×fr" }),
-  node("fr06", "math", "math", "0.6 × fr", 1000, 2110, { operation: "*" }),
-  node("two-hz", "constant", "math", "搜索半宽 2Hz", 1000, 2270, { numberValue: 2, unit: "Hz" }),
-  node("band06", "bandConstruct", "spectrum", "0.6fr ± 2Hz", 1250, 2110),
-  node("slice06", "bandSlice", "spectrum", "0.6fr 包络频段", 1500, 2110),
-  node("peak06", "peakDetect", "spectrum", "0.6fr 显著峰", 1750, 2110, { minProminence: 1.08, minDistanceHz: 0.5, maxPeaks: 20 }),
-  node("count06", "listCount", "list", "0.6fr 峰数量", 2000, 2040),
-  node("zero-count", "constant", "math", "常数 0", 2000, 2200, { numberValue: 0, unit: "个" }),
-  node("has06", "compare", "condition", "0.6fr 是否有峰", 2250, 2080, { compareOp: ">" }),
-  node("best06", "minmax", "list", "0.6fr 最大峰频率", 2000, 2330, { sortDirection: "desc", selectField: "amplitude", outputField: "frequency" }),
-  node("c04", "constant", "math", "系数 0.4", 750, 2470, { numberValue: 0.4, unit: "×fr" }),
-  node("fr04", "math", "math", "0.4 × fr", 1000, 2470, { operation: "*" }),
-  node("band04", "bandConstruct", "spectrum", "0.4fr ± 2Hz", 1250, 2470),
-  node("slice04", "bandSlice", "spectrum", "0.4fr 包络频段", 1500, 2470),
-  node("peak04", "peakDetect", "spectrum", "0.4fr 显著峰", 1750, 2470, { minProminence: 1.08, minDistanceHz: 0.5, maxPeaks: 20 }),
-  node("best04", "minmax", "list", "0.4fr 最大峰频率", 2000, 2470, { sortDirection: "desc", selectField: "amplitude", outputField: "frequency" }),
-  node("fc-out-06", "math", "math", "fr − fc_in", 2250, 2330, { operation: "-" }),
-  node("fc-in-04", "math", "math", "fr − fc_out", 2250, 2470, { operation: "-" }),
-  node("fc-in", "select", "condition", "保持架对内频率 fc_in", 2500, 2240),
-  node("fc-out", "select", "condition", "保持架对外频率 fc_out", 2500, 2440),
-  node("fc-targets", "listMerge", "list", "fc_in / fc_out 列表", 2750, 2340),
-  node("cross-match", "frequencyMatch", "spectrum", "跨频段保持架验证", 3000, 2340, { toleranceHz: 2 }),
-  node("cross-count", "listCount", "list", "跨频段命中数量", 3250, 2340),
-  node("min-hits", "constant", "math", "最少命中次数", 3250, 2510, { numberValue: 2, unit: "个" }),
-  node("cross-ok", "compare", "condition", "跨频段验证通过", 3500, 2380, { compareOp: ">=" }),
-
-  node("candidate-frequencies", "fieldExtract", "list", "提取候选频率", 0, 2860, { selectField: "frequency" }),
-  node("ratio-out", "math", "math", "候选频率 ÷ fc_out", 250, 2760, { operation: "/" }),
-  node("round-out", "round", "math", "外圈候选整数 n", 500, 2760, { roundMode: "round" }),
-  node("delta-out", "math", "math", "外圈倍数偏差", 750, 2760, { operation: "-" }),
-  node("abs-out", "absolute", "math", "外圈偏差绝对值", 1000, 2760),
-  node("tol01", "constant", "math", "偏差限值 0.1", 1000, 2920, { numberValue: 0.1, unit: "—" }),
-  node("cmp-out", "compare", "condition", "外圈倍数偏差合格", 1250, 2790, { compareOp: "<=" }),
-  node("outer-candidates", "listFilter", "list", "外圈匹配候选", 1500, 2760),
-  node("outer-count", "listCount", "list", "外圈候选数量", 1750, 2760),
-  node("outer-has", "compare", "condition", "存在外圈候选", 2000, 2760, { compareOp: ">" }),
-  node("matched-n-out", "listFilter", "list", "外圈匹配 n", 1500, 2940),
-  node("theory-inner", "math", "math", "理论内圈频率", 1750, 2940, { operation: "*" }),
-  node("match-inner-theory", "frequencyMatch", "spectrum", "反向验证理论内圈", 2000, 2940, { toleranceHz: 2 }),
-  node("inner-proof-count", "listCount", "list", "内圈互证峰数量", 2250, 2940),
-  node("inner-proof-ok", "compare", "condition", "内圈互证存在", 2500, 2940, { compareOp: ">" }),
-  node("outer-and", "logic", "condition", "外圈双向一致性", 2750, 2820, { logic: "AND" }),
-
-  node("ratio-in", "math", "math", "候选频率 ÷ fc_in", 250, 3200, { operation: "/" }),
-  node("round-in", "round", "math", "内圈候选整数 n", 500, 3200, { roundMode: "round" }),
-  node("delta-in", "math", "math", "内圈倍数偏差", 750, 3200, { operation: "-" }),
-  node("abs-in", "absolute", "math", "内圈偏差绝对值", 1000, 3200),
-  node("cmp-in", "compare", "condition", "内圈倍数偏差合格", 1250, 3200, { compareOp: "<=" }),
-  node("inner-candidates", "listFilter", "list", "内圈匹配候选", 1500, 3200),
-  node("inner-count", "listCount", "list", "内圈候选数量", 1750, 3200),
-  node("inner-has", "compare", "condition", "存在内圈候选", 2000, 3200, { compareOp: ">" }),
-  node("matched-n-in", "listFilter", "list", "内圈匹配 n", 1500, 3380),
-  node("theory-outer", "math", "math", "理论外圈频率", 1750, 3380, { operation: "*" }),
-  node("match-outer-theory", "frequencyMatch", "spectrum", "反向验证理论外圈", 2000, 3380, { toleranceHz: 2 }),
-  node("outer-proof-count", "listCount", "list", "外圈互证峰数量", 2250, 3380),
-  node("outer-proof-ok", "compare", "condition", "外圈互证存在", 2500, 3380, { compareOp: ">" }),
-  node("inner-and", "logic", "condition", "内圈双向一致性", 2750, 3260, { logic: "AND" }),
-  node("any-fault", "logic", "condition", "任一内外圈匹配", 3000, 3040, { logic: "OR" }),
-  node("not-fault", "logic", "condition", "无内外圈匹配", 3250, 3040, { logic: "NOT" }),
-  node("outer-result", "output", "output", "轴承外圈故障", 3250, 2760, { resultText: "轴承外圈故障" }),
-  node("inner-result", "output", "output", "轴承内圈故障", 3250, 3260, { resultText: "轴承内圈故障" }),
-  node("normal-result", "output", "output", "非轴承内外圈故障", 3500, 3040, { resultText: "不属于轴承内/外圈故障" }),
-  node("report", "report", "report", "诊断报告导出", 3750, 3040),
-  node("n-min", "constant", "math", "滚动体数量下限", 0, 3620, { numberValue: 6, unit: "个" }),
-  node("n-max", "constant", "math", "滚动体数量上限", 0, 3760, { numberValue: 12, unit: "个" }),
-  node("n-out-min", "compare", "condition", "外圈 n ≥ 下限", 250, 3540, { compareOp: ">=" }),
-  node("n-out-max", "compare", "condition", "外圈 n ≤ 上限", 250, 3710, { compareOp: "<=" }),
-  node("n-out-range", "logic", "condition", "外圈 n 范围合格", 500, 3620, { logic: "AND" }),
-  node("outer-mask", "logic", "condition", "外圈偏差与范围", 750, 3620, { logic: "AND" }),
-  node("n-in-min", "compare", "condition", "内圈 n ≥ 下限", 1000, 3540, { compareOp: ">=" }),
-  node("n-in-max", "compare", "condition", "内圈 n ≤ 上限", 1000, 3710, { compareOp: "<=" }),
-  node("n-in-range", "logic", "condition", "内圈 n 范围合格", 1250, 3620, { logic: "AND" }),
-  node("inner-mask", "logic", "condition", "内圈偏差与范围", 1500, 3620, { logic: "AND" }),
-  node("display-diff", "display", "display", "差谱显示", 1250, 1940, { displayMode: "spectrum" }),
-  node("display-env", "display", "display", "包络谱显示", 750, 2340, { displayMode: "spectrum" }),
-  node("display-candidates", "display", "display", "候选频率显示", 2750, 1230, { displayMode: "list" }),
+  node("outer-match", "integerRelation", "condition", "外圈整数倍双向互证", 2990, 1110, { deviationLimit: 0.1, minOrder: 6, maxOrder: 12, toleranceHz: 2 }),
+  node("inner-match", "integerRelation", "condition", "内圈整数倍双向互证", 3260, 1110, { deviationLimit: 0.1, minOrder: 6, maxOrder: 12, toleranceHz: 2 }),
+  node("any-fault", "logic", "condition", "任一内外圈匹配", 3530, 1090, { logic: "OR" }),
+  node("not-fault", "logic", "condition", "无内外圈匹配", 3800, 1090, { logic: "NOT" }),
+  node("outer-result", "output", "output", "轴承外圈故障", 3530, 1360, { resultText: "轴承外圈故障" }),
+  node("inner-result", "output", "output", "轴承内圈故障", 3800, 1360, { resultText: "轴承内圈故障" }),
+  node("normal-result", "output", "output", "非轴承内外圈故障", 4070, 1090, { resultText: "不属于轴承内/外圈故障" }),
+  node("report", "report", "report", "诊断报告导出", 4340, 1200),
 ];
 
 export const exampleConnections: Connection[] = [
-  edge("normal", "rms-n"), edge("fault", "rms-f"), edge("rms-f", "rms-ratio", "a"), edge("rms-n", "rms-ratio", "b"), edge("rms-ratio", "cmp-a", "a"), edge("th-a", "cmp-a", "b"),
-  edge("normal", "kurt-n"), edge("fault", "kurt-f"), edge("kurt-f", "kurt-ratio", "a"), edge("kurt-n", "kurt-ratio", "b"), edge("kurt-ratio", "cmp-b", "a"), edge("th-b", "cmp-b", "b"),
-  edge("cmp-a", "initial-and", "items"), edge("cmp-b", "initial-and", "items"), edge("fault", "fault-gate", "data"), edge("initial-and", "fault-gate", "condition"),
-  edge("fault-gate", "integrate"), edge("integrate", "fft-vel"), edge("fft-vel", "peaks-vel", "spectrum"), edge("peaks-vel", "harmonic-groups", "peaks"), edge("harmonic-groups", "fr"),
-  edge("fault-gate", "fft-fault"), edge("fr", "ten-fr", "a"), edge("ten", "ten-fr", "b"), edge("fft-fault", "fault-band", "spectrum"), edge("zero", "fault-band", "min"), edge("ten-fr", "fault-band", "max"), edge("fault-band", "peaks-fault", "spectrum"),
-  edge("fr", "shaft-harmonics", "base"), edge("peaks-fault", "exclude-shaft", "peaks"), edge("shaft-harmonics", "exclude-shaft", "frequencies"), edge("tol-shaft", "exclude-shaft", "tolerance"), edge("fault-band", "total-energy"),
-  edge("exclude-shaft", "energy-ratio", "peaks"), edge("total-energy", "energy-ratio", "energy"), edge("energy-ratio", "cmp-c", "a"), edge("th-c", "cmp-c", "b"), edge("fault-band", "contrast", "spectrum"), edge("exclude-shaft", "contrast", "peaks"), edge("three-hz", "contrast", "width"), edge("contrast", "cmp-e", "a"), edge("th-e", "cmp-e", "b"), edge("cmp-c", "candidate-mask", "items"), edge("cmp-e", "candidate-mask", "items"), edge("exclude-shaft", "f-list", "list"), edge("candidate-mask", "f-list", "mask"), edge("f-list", "display-candidates"),
-  edge("normal", "fft-normal"), edge("fft-normal", "align", "a"), edge("fft-fault", "align", "b"), edge("align", "aligned-normal"), edge("align", "aligned-fault"), edge("aligned-fault", "subtract-spectrum", "a"), edge("aligned-normal", "subtract-spectrum", "b"), edge("subtract-spectrum", "diff-spectrum"), edge("diff-spectrum", "sliding-energy", "spectrum"), edge("band-window", "sliding-energy", "window"), edge("band-step", "sliding-energy", "step"), edge("sliding-energy", "energy-bands", "spectrum"), edge("energy-bands", "sort-bands"), edge("sort-bands", "top3", "input"), edge("top-count", "top3", "n"), edge("top3", "band-centers"), edge("band-centers", "band-list", "centers"), edge("demod-width", "band-list", "width"), edge("diff-spectrum", "display-diff"),
-  edge("fault-gate", "bandpass", "waveform"), edge("band-list", "bandpass", "bands"), edge("bandpass", "envelope"), edge("envelope", "fft-envelope"), edge("fft-envelope", "display-env"),
-  edge("fr", "fr06", "a"), edge("c06", "fr06", "b"), edge("fr06", "band06", "centers"), edge("two-hz", "band06", "width"), edge("fft-envelope", "slice06", "spectrum"), edge("band06", "slice06", "bands"), edge("slice06", "peak06", "spectrum"), edge("peak06", "count06"), edge("count06", "has06", "a"), edge("zero-count", "has06", "b"), edge("peak06", "best06"),
-  edge("fr", "fr04", "a"), edge("c04", "fr04", "b"), edge("fr04", "band04", "centers"), edge("two-hz", "band04", "width"), edge("fft-envelope", "slice04", "spectrum"), edge("band04", "slice04", "bands"), edge("slice04", "peak04", "spectrum"), edge("peak04", "best04"),
-  edge("fr", "fc-out-06", "a"), edge("best06", "fc-out-06", "b"), edge("fr", "fc-in-04", "a"), edge("best04", "fc-in-04", "b"),
-  edge("has06", "fc-in", "condition"), edge("best06", "fc-in", "a"), edge("fc-in-04", "fc-in", "b"), edge("has06", "fc-out", "condition"), edge("fc-out-06", "fc-out", "a"), edge("best04", "fc-out", "b"),
-  edge("fc-in", "fc-targets", "items"), edge("fc-out", "fc-targets", "items"), edge("fft-envelope", "cross-match", "spectrum"), edge("fc-targets", "cross-match", "targets"), edge("two-hz", "cross-match", "tolerance"), edge("cross-match", "cross-count"), edge("cross-count", "cross-ok", "a"), edge("min-hits", "cross-ok", "b"),
-  edge("f-list", "candidate-frequencies"), edge("candidate-frequencies", "ratio-out", "a"), edge("fc-out", "ratio-out", "b"), edge("ratio-out", "round-out"), edge("ratio-out", "delta-out", "a"), edge("round-out", "delta-out", "b"), edge("delta-out", "abs-out"), edge("abs-out", "cmp-out", "a"), edge("tol01", "cmp-out", "b"), edge("round-out", "n-out-min", "a"), edge("n-min", "n-out-min", "b"), edge("round-out", "n-out-max", "a"), edge("n-max", "n-out-max", "b"), edge("n-out-min", "n-out-range", "items"), edge("n-out-max", "n-out-range", "items"), edge("cmp-out", "outer-mask", "items"), edge("n-out-range", "outer-mask", "items"), edge("f-list", "outer-candidates", "list"), edge("outer-mask", "outer-candidates", "mask"), edge("outer-candidates", "outer-count"), edge("outer-count", "outer-has", "a"), edge("zero-count", "outer-has", "b"), edge("round-out", "matched-n-out", "list"), edge("outer-mask", "matched-n-out", "mask"), edge("matched-n-out", "theory-inner", "a"), edge("fc-in", "theory-inner", "b"), edge("fft-envelope", "match-inner-theory", "spectrum"), edge("theory-inner", "match-inner-theory", "targets"), edge("two-hz", "match-inner-theory", "tolerance"), edge("match-inner-theory", "inner-proof-count"), edge("inner-proof-count", "inner-proof-ok", "a"), edge("zero-count", "inner-proof-ok", "b"), edge("outer-has", "outer-and", "items"), edge("inner-proof-ok", "outer-and", "items"), edge("cross-ok", "outer-and", "items"),
-  edge("candidate-frequencies", "ratio-in", "a"), edge("fc-in", "ratio-in", "b"), edge("ratio-in", "round-in"), edge("ratio-in", "delta-in", "a"), edge("round-in", "delta-in", "b"), edge("delta-in", "abs-in"), edge("abs-in", "cmp-in", "a"), edge("tol01", "cmp-in", "b"), edge("round-in", "n-in-min", "a"), edge("n-min", "n-in-min", "b"), edge("round-in", "n-in-max", "a"), edge("n-max", "n-in-max", "b"), edge("n-in-min", "n-in-range", "items"), edge("n-in-max", "n-in-range", "items"), edge("cmp-in", "inner-mask", "items"), edge("n-in-range", "inner-mask", "items"), edge("f-list", "inner-candidates", "list"), edge("inner-mask", "inner-candidates", "mask"), edge("inner-candidates", "inner-count"), edge("inner-count", "inner-has", "a"), edge("zero-count", "inner-has", "b"), edge("round-in", "matched-n-in", "list"), edge("inner-mask", "matched-n-in", "mask"), edge("matched-n-in", "theory-outer", "a"), edge("fc-out", "theory-outer", "b"), edge("fft-envelope", "match-outer-theory", "spectrum"), edge("theory-outer", "match-outer-theory", "targets"), edge("two-hz", "match-outer-theory", "tolerance"), edge("match-outer-theory", "outer-proof-count"), edge("outer-proof-count", "outer-proof-ok", "a"), edge("zero-count", "outer-proof-ok", "b"), edge("inner-has", "inner-and", "items"), edge("outer-proof-ok", "inner-and", "items"), edge("cross-ok", "inner-and", "items"),
-  edge("outer-and", "any-fault", "items"), edge("inner-and", "any-fault", "items"), edge("any-fault", "not-fault", "items"), edge("outer-and", "outer-result"), edge("inner-and", "inner-result"), edge("not-fault", "normal-result"), edge("outer-result", "report", "results"), edge("inner-result", "report", "results"), edge("normal-result", "report", "results"),
+  edge("normal", "rms-check", "normal"), edge("fault", "rms-check", "fault"), edge("th-a", "rms-check", "threshold"),
+  edge("normal", "kurt-check", "normal"), edge("fault", "kurt-check", "fault"), edge("th-b", "kurt-check", "threshold"),
+  edge("rms-check", "initial-and", "items"), edge("kurt-check", "initial-and", "items"), edge("fault", "fault-gate", "data"), edge("initial-and", "fault-gate", "condition"),
+  edge("fault-gate", "fr", "waveform"), edge("fault-gate", "fft-fault"), edge("fault-gate", "fft-envelope", "waveform"),
+  edge("fft-fault", "f-list", "spectrum"), edge("fr", "f-list", "fr"), edge("th-c", "f-list", "energyThreshold"), edge("th-e", "f-list", "contrastThreshold"), edge("f-list", "display-candidates"),
+  edge("normal", "fft-normal"), edge("fft-normal", "band-list", "normalSpectrum"), edge("fft-fault", "band-list", "faultSpectrum"), edge("demod-width", "band-list", "halfWidth"),
+  edge("band-list", "fft-envelope", "bands"), edge("fft-envelope", "display-env"), edge("fft-envelope", "cage", "spectra"), edge("fr", "cage", "fr"),
+  edge("cage", "fc-in"), edge("cage", "fc-out"), edge("fc-in", "fc-targets", "items"), edge("fc-out", "fc-targets", "items"),
+  edge("fft-envelope", "cross-ok", "spectra"), edge("fc-targets", "cross-ok", "targets"),
+  edge("f-list", "outer-match", "candidates"), edge("fc-out", "outer-match", "base"), edge("fc-in", "outer-match", "pairedBase"), edge("fft-envelope", "outer-match", "spectra"), edge("cross-ok", "outer-match", "cross"),
+  edge("f-list", "inner-match", "candidates"), edge("fc-in", "inner-match", "base"), edge("fc-out", "inner-match", "pairedBase"), edge("fft-envelope", "inner-match", "spectra"), edge("cross-ok", "inner-match", "cross"),
+  edge("outer-match", "any-fault", "items"), edge("inner-match", "any-fault", "items"), edge("any-fault", "not-fault", "items"),
+  edge("outer-match", "outer-result"), edge("inner-match", "inner-result"), edge("not-fault", "normal-result"),
+  edge("outer-result", "report", "results"), edge("inner-result", "report", "results"), edge("normal-result", "report", "results"),
 ];
 
 function largestPowerOfTwo(value: number) {
@@ -699,6 +637,44 @@ function waveformList(value?: RuntimeValue) {
   return [];
 }
 
+function harmonicBases(peaks: PeakPoint[], current: FlowNode) {
+  const orders = (current.harmonicOrders ?? "1,2,3").split(",").map(Number).filter((item) => Number.isFinite(item) && item > 0);
+  const tolerance = Math.max(0.01, current.toleranceHz ?? 1.5);
+  const candidates = peaks.filter((peak) => peak.f > 1).map((base) => {
+    const matches = orders.map((order) => peaks.find((peak) => Math.abs(peak.f - base.f * order) <= tolerance)).filter(Boolean) as PeakPoint[];
+    return { base: base.f, matches: matches.length, score: matches.reduce((sum, peak) => sum + peak.a, 0) };
+  }).filter((item) => item.matches === orders.length).sort((a, b) => b.score - a.score);
+  return candidates.filter((item, index, all) => all.findIndex((candidate) => Math.abs(candidate.base - item.base) <= tolerance) === index).slice(0, 20).map((item) => item.base);
+}
+
+function matchSpectrumFrequencies(spectra: SpectrumPoint[][], targets: number[], tolerance: number) {
+  const matches: PeakPoint[] = [];
+  spectra.forEach((spectrum, sourceIndex) => targets.forEach((target, order) => {
+    const window = spectrum.filter((point) => Math.abs(point.f - target) <= tolerance);
+    if (!window.length) return;
+    const best = window.reduce((selected, point) => point.a > selected.a ? point : selected, window[0]);
+    const baselineWindow = spectrum.filter((point) => Math.abs(point.f - target) <= tolerance * 3 && Math.abs(point.f - target) > tolerance);
+    const baseline = baselineWindow.reduce((sum, point) => sum + point.a, 0) / Math.max(1, baselineWindow.length);
+    if (best.a < Math.max(1e-12, baseline) * 1.05) return;
+    matches.push({ ...best, theoretical: target, sourceIndex, order: order + 1 });
+  }));
+  return matches;
+}
+
+function slidingEnergyCurve(spectrum: SpectrumPoint[], windowHz: number, stepHz: number) {
+  if (!spectrum.length) return [];
+  const resolution = spectrum[1]?.f - spectrum[0]?.f || 1;
+  const windowPoints = Math.max(1, Math.round(windowHz / resolution)), stepPoints = Math.max(1, Math.round(stepHz / resolution));
+  const prefix = [0];
+  spectrum.forEach((point) => prefix.push(prefix[prefix.length - 1] + point.a ** 2));
+  const curve: SpectrumPoint[] = [];
+  for (let start = 0; start < spectrum.length; start += stepPoints) {
+    const end = Math.min(spectrum.length, start + windowPoints);
+    curve.push({ f: (spectrum[start].f + spectrum[Math.max(start, end - 1)].f) / 2, a: prefix[end] - prefix[start] });
+  }
+  return curve;
+}
+
 export type ExecutionResult = {
   values: Map<string, RuntimeValue>;
   errors: Map<string, string>;
@@ -809,7 +785,7 @@ export function executeGraph(nodes: FlowNode[], connections: Connection[], sourc
         }
         case "listItem": {
           const value = one("input"), index = Math.max(0, Math.round(current.index ?? 0));
-          if (value?.type === "numbers" && value.data[index] !== undefined) result = { type: "number", data: value.data[index] };
+          if (value?.type === "numbers" && value.data[index] !== undefined) result = { type: "number", data: value.data[index], unit: value.unit };
           if (value?.type === "spectra" && value.data[index]) result = { type: "spectrum", data: value.data[index] };
           if (value?.type === "waveforms" && value.data[index]) result = { type: "waveform", data: value.data[index] };
           if (value?.type === "peaks" && value.data[index]) result = { type: "number", data: value.data[index].f };
@@ -937,17 +913,113 @@ export function executeGraph(nodes: FlowNode[], connections: Connection[], sourc
         }
         case "frequencyMatch": {
           const spectra = spectrumList(one("spectrum")), targets = numbers(one("targets")), tolerance = Math.max(0.01, numbers(one("tolerance"))[0] ?? current.toleranceHz ?? 2);
-          const matches: PeakPoint[] = [];
-          spectra.forEach((spectrum, sourceIndex) => targets.forEach((target, order) => {
-            const window = spectrum.filter((point) => Math.abs(point.f - target) <= tolerance);
-            if (!window.length) return;
-            const best = window.reduce((selected, point) => point.a > selected.a ? point : selected, window[0]);
-            const baselineWindow = spectrum.filter((point) => Math.abs(point.f - target) <= tolerance * 3 && Math.abs(point.f - target) > tolerance);
-            const baseline = baselineWindow.reduce((sum, point) => sum + point.a, 0) / Math.max(1, baselineWindow.length);
-            if (best.a < Math.max(1e-12, baseline) * 1.05) return;
-            matches.push({ ...best, theoretical: target, sourceIndex, order: order + 1 });
-          }));
-          result = { type: "peaks", data: matches };
+          result = { type: "peaks", data: matchSpectrumFrequencies(spectra, targets, tolerance) };
+          break;
+        }
+        case "metricRatioCompare": {
+          const normal = waveformList(one("normal"))[0], fault = waveformList(one("fault"))[0], threshold = numbers(one("threshold"))[0] ?? 0;
+          if (normal && fault) {
+            const metric = current.metric ?? "rms";
+            const normalValue = calculateMetrics(normal.samples)[metric], faultValue = calculateMetrics(fault.samples)[metric];
+            const ratio = Math.abs(normalValue) < 1e-15 ? Number.NaN : faultValue / normalValue;
+            result = { type: "boolean", data: compareNumber(current.compareOp ?? ">", ratio, threshold), value: ratio, detail: `比值 ${Number.isFinite(ratio) ? ratio.toFixed(4) : "无效"}` };
+          }
+          break;
+        }
+        case "rotationFrequency": {
+          const wave = waveformList(one("waveform"))[0];
+          if (wave) {
+            const velocity = integrateWaveform(wave, current.highpassHz ?? 2);
+            const spectrum = calculateSpectrum(velocity.samples, velocity.fs);
+            const bases = harmonicBases(detectPeaks(spectrum, current), current);
+            if (bases.length) result = { type: "number", data: bases[0], unit: "Hz" };
+          }
+          break;
+        }
+        case "candidateScreen": {
+          const spectrum = spectrumList(one("spectrum"))[0], fr = numbers(one("fr"))[0];
+          if (spectrum && Number.isFinite(fr) && fr > 0) {
+            const upper = fr * Math.max(1, current.bandMultiplier ?? 10);
+            const band = spectrum.filter((point) => point.f >= 0 && point.f <= upper);
+            const excluded = Array.from({ length: Math.max(1, Math.round(current.excludeEndOrder ?? 30)) }, (_, index) => fr * (index + 1));
+            const tolerance = Math.max(0.01, current.toleranceHz ?? 1.5);
+            const peaks = detectPeaks(band, current).filter((peak) => !excluded.some((frequency) => Math.abs(peak.f - frequency) <= tolerance));
+            const totalEnergy = band.reduce((sum, point) => sum + point.a ** 2, 0);
+            const energyThreshold = numbers(one("energyThreshold"))[0] ?? 0.003;
+            const contrastThreshold = numbers(one("contrastThreshold"))[0] ?? 1.35;
+            const width = Math.max(0.1, current.windowHz ?? 3), resolution = band[1]?.f - band[0]?.f || 1;
+            const selected = peaks.flatMap((peak) => {
+              const energyRatio = totalEnergy ? peak.a ** 2 / totalEnergy : 0;
+              const local = band.filter((point) => Math.abs(point.f - peak.f) <= width && Math.abs(point.f - peak.f) > resolution * 1.5);
+              const background = local.reduce((sum, point) => sum + point.a, 0) / Math.max(1, local.length);
+              const contrast = peak.a / Math.max(1e-12, background);
+              return energyRatio > energyThreshold && contrast > contrastThreshold ? [{ ...peak, energyRatio, prominence: contrast }] : [];
+            });
+            result = { type: "peaks", data: selected };
+          }
+          break;
+        }
+        case "differenceBands": {
+          const normal = spectrumList(one("normalSpectrum"))[0], fault = spectrumList(one("faultSpectrum"))[0];
+          if (normal && fault) {
+            const [alignedNormal, alignedFault] = alignSpectrumPair(normal, fault);
+            const difference = alignedFault.map((point, index) => ({ f: point.f, a: Math.abs(point.a - (alignedNormal[index]?.a ?? 0)) }));
+            const curve = slidingEnergyCurve(difference, Math.max(1, current.windowHz ?? 120), Math.max(0.1, current.stepHz ?? 40));
+            const centers = detectPeaks(curve, current).sort((a, b) => b.a - a.a).slice(0, Math.max(1, Math.round(current.count ?? 3)));
+            const halfWidth = Math.abs(numbers(one("halfWidth"))[0] ?? current.halfWidthHz ?? 120);
+            result = { type: "bands", data: centers.map((peak) => ({ center: peak.f, min: Math.max(0, peak.f - halfWidth), max: peak.f + halfWidth })) };
+          }
+          break;
+        }
+        case "envelopeSpectrum": {
+          const wave = waveformList(one("waveform"))[0], bandValue = one("bands");
+          if (wave && bandValue?.type === "bands") {
+            const spectra = bandValue.data.map((band) => {
+              const envelope = envelopeWave(bandpassWave(wave, band));
+              return calculateSpectrum(envelope.samples, envelope.fs);
+            });
+            if (spectra.length === 1) result = { type: "spectrum", data: spectra[0] };
+            else if (spectra.length) result = { type: "spectra", data: spectra };
+          }
+          break;
+        }
+        case "cageSearch": {
+          const spectra = spectrumList(one("spectra")), fr = numbers(one("fr"))[0];
+          if (spectra.length && Number.isFinite(fr) && fr > 0) {
+            const halfWidth = Math.max(0.1, current.halfWidthHz ?? 2);
+            const findBest = (ratio: number) => {
+              const center = fr * ratio;
+              const peaks = spectra.flatMap((spectrum, sourceIndex) => detectPeaks(spectrum.filter((point) => Math.abs(point.f - center) <= halfWidth), current, sourceIndex));
+              return peaks.sort((a, b) => b.a - a.a)[0]?.f;
+            };
+            const primary = findBest(current.primaryRatio ?? 0.6);
+            if (primary !== undefined) result = { type: "numbers", data: [primary, fr - primary], unit: "Hz" };
+            else {
+              const fallback = findBest(current.fallbackRatio ?? 0.4);
+              if (fallback !== undefined) result = { type: "numbers", data: [fr - fallback, fallback], unit: "Hz" };
+            }
+          }
+          break;
+        }
+        case "spectrumPresence": {
+          const spectra = spectrumList(one("spectra")), targets = numbers(one("targets"));
+          const tolerance = Math.max(0.01, current.toleranceHz ?? 2), required = Math.max(1, Math.round(numbers(one("minHits"))[0] ?? current.minHits ?? 2));
+          const count = matchSpectrumFrequencies(spectra, targets, tolerance).length;
+          result = { type: "boolean", data: count >= required, value: count, detail: `命中 ${count}/${required}` };
+          break;
+        }
+        case "integerRelation": {
+          const candidates = numbers(one("candidates")), base = numbers(one("base"))[0], pairedBase = numbers(one("pairedBase"))[0], spectra = spectrumList(one("spectra"));
+          const cross = booleanValue(one("cross")), deviation = Math.max(0, current.deviationLimit ?? 0.1), minOrder = Math.max(1, Math.round(current.minOrder ?? 6)), maxOrder = Math.max(minOrder, Math.round(current.maxOrder ?? 12)), tolerance = Math.max(0.01, current.toleranceHz ?? 2);
+          let matched = 0;
+          if (cross && Number.isFinite(base) && base > 0 && Number.isFinite(pairedBase) && pairedBase > 0) {
+            for (const frequency of candidates) {
+              const ratio = frequency / base, order = Math.round(ratio);
+              if (Math.abs(ratio - order) > deviation || order < minOrder || order > maxOrder) continue;
+              if (matchSpectrumFrequencies(spectra, [order * pairedBase], tolerance).length) matched++;
+            }
+          }
+          result = { type: "boolean", data: matched > 0, value: matched, detail: matched ? `匹配 ${matched} 个候选` : "无匹配候选" };
           break;
         }
         case "display": result = one("input"); break;
@@ -970,7 +1042,7 @@ export function executeGraph(nodes: FlowNode[], connections: Connection[], sourc
 export function summarizeValue(value?: RuntimeValue) {
   if (!value) return { primary: "—", secondary: "等待上游数据" };
   if (value.type === "number") return { primary: Number.isFinite(value.data) ? value.data.toFixed(Math.abs(value.data) >= 100 ? 1 : 4) : "无效", secondary: value.unit ?? "数值" };
-  if (value.type === "boolean") return { primary: value.data ? "满足" : "不满足", secondary: "布尔结果" };
+  if (value.type === "boolean") return { primary: value.data ? "满足" : "不满足", secondary: value.detail ?? "布尔结果" };
   if (value.type === "waveform") return { primary: `${value.data.samples.length.toLocaleString()} 点`, secondary: `${value.data.fs.toLocaleString()} Hz` };
   if (value.type === "spectrum") return { primary: `${value.data.length.toLocaleString()} 线`, secondary: value.data.length ? `0–${value.data[value.data.length - 1].f.toFixed(0)} Hz` : "空频谱" };
   if (value.type === "numbers") return { primary: `${value.data.length} 项`, secondary: value.data.slice(0, 3).map((item) => item.toFixed(2)).join("、") || "空列表" };
