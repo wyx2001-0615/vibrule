@@ -316,7 +316,6 @@ export default function Home() {
   const [diagnosis, setDiagnosis] = useState<{ fault: boolean; matched: number; total: number } | null>(null);
   const [runResults, setRunResults] = useState<RunResults | null>(null);
   const [toast, setToast] = useState("");
-  const [draftLink, setDraftLink] = useState<{ source: string; x: number; y: number } | null>(null);
   const [canvasView, setCanvasViewState] = useState<CanvasView>(INITIAL_VIEW);
   const [isPanning, setIsPanning] = useState(false);
   const [selectionBox, setSelectionBox] = useState<SelectionBox | null>(null);
@@ -333,11 +332,15 @@ export default function Home() {
   const [historyImporting, setHistoryImporting] = useState(false);
   const [historyDropActive, setHistoryDropActive] = useState(false);
   const canvasViewportRef = useRef<HTMLDivElement>(null);
+  const draftEdgeRef = useRef<SVGPathElement>(null);
   const dragRef = useRef<{ id: string; dx: number; dy: number } | null>(null);
   const linkRef = useRef<{ source: string } | null>(null);
+  const nodesRef = useRef(nodes);
+  const connectNodesRef = useRef<(source: string, target: string) => void>(() => undefined);
   const panRef = useRef<{ startX: number; startY: number; originX: number; originY: number } | null>(null);
   const selectionRef = useRef<{ startX: number; startY: number; currentX: number; currentY: number } | null>(null);
   const viewRef = useRef<CanvasView>(INITIAL_VIEW);
+  nodesRef.current = nodes;
 
   const loadedSourceNodes = nodes.filter((node) => node.type === "source" && sourceSignals[node.id]?.samples.length);
   const loadedPointCount = loadedSourceNodes.reduce((sum, node) => sum + sourceSignals[node.id].samples.length, 0);
@@ -385,6 +388,22 @@ export default function Home() {
     });
     setDiagnosis(null);
   }
+  connectNodesRef.current = connectNodes;
+
+  function updateDraftEdge(sourceId: string, x: number, y: number) {
+    const source = nodesRef.current.find((node) => node.id === sourceId);
+    const path = draftEdgeRef.current;
+    if (!source || !path) return;
+    const sx = source.x + NODE_WIDTH;
+    const sy = source.y + PORT_Y;
+    path.setAttribute("d", `M${sx},${sy} C${sx + 80},${sy} ${x - 80},${y} ${x},${y}`);
+    path.classList.add("active");
+  }
+
+  function clearDraftEdge() {
+    draftEdgeRef.current?.classList.remove("active");
+    canvasViewportRef.current?.classList.remove("interacting");
+  }
 
   function setCanvasView(next: CanvasView | ((current: CanvasView) => CanvasView)) {
     setCanvasViewState((current) => {
@@ -420,21 +439,29 @@ export default function Home() {
   }
 
   useEffect(() => {
-    const handleMove = (event: PointerEvent) => {
+    let moveFrame = 0;
+    let latestPointer: { x: number; y: number } | null = null;
+
+    const applyPointerMove = () => {
+      moveFrame = 0;
+      const pointer = latestPointer;
+      latestPointer = null;
+      if (!pointer) return;
+      const { x: clientX, y: clientY } = pointer;
       if (panRef.current) {
         const { startX, startY, originX, originY } = panRef.current;
-        setCanvasView((current) => ({ ...current, x: originX + event.clientX - startX, y: originY + event.clientY - startY }));
+        setCanvasView((current) => ({ ...current, x: originX + clientX - startX, y: originY + clientY - startY }));
       }
       if (selectionRef.current) {
-        selectionRef.current.currentX = event.clientX;
-        selectionRef.current.currentY = event.clientY;
+        selectionRef.current.currentX = clientX;
+        selectionRef.current.currentY = clientY;
         const viewport = canvasViewportRef.current;
         if (viewport) {
           const viewportRect = viewport.getBoundingClientRect();
-          const left = Math.max(viewportRect.left, Math.min(selectionRef.current.startX, event.clientX));
-          const right = Math.min(viewportRect.right, Math.max(selectionRef.current.startX, event.clientX));
-          const top = Math.max(viewportRect.top, Math.min(selectionRef.current.startY, event.clientY));
-          const bottom = Math.min(viewportRect.bottom, Math.max(selectionRef.current.startY, event.clientY));
+          const left = Math.max(viewportRect.left, Math.min(selectionRef.current.startX, clientX));
+          const right = Math.min(viewportRect.right, Math.max(selectionRef.current.startX, clientX));
+          const top = Math.max(viewportRect.top, Math.min(selectionRef.current.startY, clientY));
+          const bottom = Math.min(viewportRect.bottom, Math.max(selectionRef.current.startY, clientY));
           setSelectionBox({ left: left - viewportRect.left, top: top - viewportRect.top, width: Math.max(0, right - left), height: Math.max(0, bottom - top) });
           const selected = Array.from(viewport.querySelectorAll<HTMLElement>(".flow-node[data-node-id]")).flatMap((element) => {
             const rect = element.getBoundingClientRect();
@@ -446,17 +473,29 @@ export default function Home() {
       }
       if (dragRef.current) {
         const { id, dx, dy } = dragRef.current;
-        const point = screenToCanvas(event.clientX, event.clientY);
+        const point = screenToCanvas(clientX, clientY);
         const x = point.x - dx;
         const y = point.y - dy;
         setNodes((current) => current.map((node) => node.id === id ? { ...node, x, y } : node));
       }
       if (linkRef.current) {
-        const point = screenToCanvas(event.clientX, event.clientY);
-        setDraftLink({ source: linkRef.current.source, ...point });
+        const point = screenToCanvas(clientX, clientY);
+        updateDraftEdge(linkRef.current.source, point.x, point.y);
       }
     };
+
+    const handleMove = (event: PointerEvent) => {
+      latestPointer = { x: event.clientX, y: event.clientY };
+      if (!moveFrame) moveFrame = window.requestAnimationFrame(applyPointerMove);
+    };
+
     const handleUp = (event: PointerEvent) => {
+      if (moveFrame) {
+        window.cancelAnimationFrame(moveFrame);
+        moveFrame = 0;
+      }
+      latestPointer = { x: event.clientX, y: event.clientY };
+      applyPointerMove();
       dragRef.current = null;
       panRef.current = null;
       selectionRef.current = null;
@@ -467,15 +506,19 @@ export default function Home() {
         const element = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
         const targetElement = element?.closest("[data-input-node]") as HTMLElement | null;
         const target = targetElement?.dataset.inputNode;
-        if (target && target !== source) connectNodes(source, target);
+        if (target && target !== source) connectNodesRef.current(source, target);
         linkRef.current = null;
-        setDraftLink(null);
       }
+      clearDraftEdge();
     };
     window.addEventListener("pointermove", handleMove);
     window.addEventListener("pointerup", handleUp);
-    return () => { window.removeEventListener("pointermove", handleMove); window.removeEventListener("pointerup", handleUp); };
-  }, [nodes]);
+    return () => {
+      if (moveFrame) window.cancelAnimationFrame(moveFrame);
+      window.removeEventListener("pointermove", handleMove);
+      window.removeEventListener("pointerup", handleUp);
+    };
+  }, []);
 
   useEffect(() => {
     const viewport = canvasViewportRef.current;
@@ -613,6 +656,7 @@ export default function Home() {
     if (!node) return;
     const point = screenToCanvas(event.clientX, event.clientY);
     dragRef.current = { id, dx: point.x - node.x, dy: point.y - node.y };
+    canvasViewportRef.current?.classList.add("interacting");
     setSelectedIds([id]);
   }
 
@@ -640,7 +684,8 @@ export default function Home() {
     event.preventDefault(); event.stopPropagation();
     const point = screenToCanvas(event.clientX, event.clientY);
     linkRef.current = { source };
-    setDraftLink({ source, ...point });
+    canvasViewportRef.current?.classList.add("interacting");
+    updateDraftEdge(source, point.x, point.y);
   }
 
   function finishConnection(event: React.PointerEvent, target: string) {
@@ -648,7 +693,7 @@ export default function Home() {
     const source = linkRef.current?.source;
     if (source && source !== target) connectNodes(source, target);
     linkRef.current = null;
-    setDraftLink(null);
+    clearDraftEdge();
   }
 
   function handleCanvasDrop(event: React.DragEvent) {
@@ -705,7 +750,8 @@ export default function Home() {
     setConnections([]);
     setSourceSignals({});
     setSelectedIds([]);
-    setDraftLink(null);
+    linkRef.current = null;
+    clearDraftEdge();
     setDiagnosis(null);
     setRunResults(null);
     setPreviewNodeId(null);
@@ -998,9 +1044,9 @@ export default function Home() {
                 const sx = source.x + NODE_WIDTH, sy = source.y + PORT_Y, tx = target.x, ty = target.y + PORT_Y;
                 return <path key={edge.id} d={`M${sx},${sy} C${sx+80},${sy} ${tx-80},${ty} ${tx},${ty}`} onClick={(event) => {event.stopPropagation();setConnections((current)=>current.filter((item)=>item.id!==edge.id));setDiagnosis(null);}}><title>点击删除连线</title></path>;
               })}
-              {draftLink && (() => { const source=nodeById.get(draftLink.source); if(!source)return null;const sx=source.x+NODE_WIDTH,sy=source.y+PORT_Y;return <path className="draft-edge" d={`M${sx},${sy} C${sx+80},${sy} ${draftLink.x-80},${draftLink.y} ${draftLink.x},${draftLink.y}`}/>; })()}
+              <path ref={draftEdgeRef} className="draft-edge"/>
             </svg>
-            {nodes.map((node) => <article key={node.id} data-node-id={node.id} className={`flow-node ${node.type} ${selectedIds.includes(node.id)?"selected":""}`} style={{left:node.x,top:node.y}} onPointerDown={(event)=>startNodeDrag(event,node.id)} onClick={(event)=>{event.stopPropagation();setSelectedIds([node.id]);}} onDragOver={node.type === "source" ? (event) => {event.preventDefault();event.dataTransfer.dropEffect="copy";} : undefined} onDrop={node.type === "source" ? (event) => handleHistoryDropOnSource(event,node.id) : undefined}>
+            {nodes.map((node) => <article key={node.id} data-node-id={node.id} className={`flow-node ${node.type} ${selectedIds.includes(node.id)?"selected":""}`} style={{transform:`translate3d(${node.x}px,${node.y}px,0)`}} onPointerDown={(event)=>startNodeDrag(event,node.id)} onClick={(event)=>{event.stopPropagation();setSelectedIds([node.id]);}} onDragOver={node.type === "source" ? (event) => {event.preventDefault();event.dataTransfer.dropEffect="copy";} : undefined} onDrop={node.type === "source" ? (event) => handleHistoryDropOnSource(event,node.id) : undefined}>
               <button className="input-port port" data-input-node={node.id} aria-label={`连接到${node.title}`} onPointerUp={(event)=>finishConnection(event,node.id)}/>
               {node.type !== "report" && node.type !== "display" && <button className="output-port port" aria-label={`从${node.title}开始连线`} onPointerDown={(event)=>startConnection(event,node.id)}/>} 
               <header><span className="node-type-icon">{node.type==="source"?"∿":node.type==="feature"?"ƒ":node.type==="peakSearch"?"⌃":node.type==="condition"?"?":node.type==="logic"?(node.logic==="AND"?"&":"≥1"):node.type==="display"?"▥":node.type==="report"?"W":"!"}</span><div><small>{node.type==="source"?"数据输入":node.type==="feature"?"信号处理":node.type==="peakSearch"?"频谱分析":node.type==="condition"?"条件判断":node.type==="logic"?"逻辑组合":node.type==="display"?"数据显示":node.type==="report"?"报告输出":"诊断输出"}</small><strong>{node.title}</strong></div><button className="node-delete" aria-label="删除节点" onClick={()=>removeNode(node.id)}>×</button></header>
