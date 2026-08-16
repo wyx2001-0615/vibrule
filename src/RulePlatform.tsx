@@ -143,6 +143,7 @@ export default function RulePlatform() {
   const [selectionBox, setSelectionBox] = useState<SelectionBox | null>(null);
   const [previewNodeId, setPreviewNodeId] = useState<string | null>(null);
   const [sidebarMode, setSidebarMode] = useState<SidebarMode>("nodes");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [historyRecords, setHistoryRecords] = useState<HistoryRecord[]>([]);
   const [historySearch, setHistorySearch] = useState("");
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -432,11 +433,12 @@ export default function RulePlatform() {
 
   return <main className="flow-app">
     <header className="flow-header">
-      <div className="flow-brand"><span>∿</span><div><strong>Watch</strong></div></div>
+      <div className="flow-brand"><strong>Watch</strong></div>
       <div className="flow-actions"><span className="data-state"><i className={loadedSourceNodes.length?"ready":""}/>{loadedSourceNodes.length?`${loadedSourceNodes.length} 个波形 · ${loadedPointCount.toLocaleString()} 点`:"实例需要正常/故障两组波形"}</span><button className="ghost-button" onClick={restoreExample}>恢复实例</button><button className="ghost-button example-data-button" onClick={loadExampleData}>载入实例数据</button><button className="ghost-button" onClick={()=>setConnections([])}>清空连线</button><button className="ghost-button clear-canvas-button" onClick={clearCanvas}>清空画布</button><button className="run-button" onClick={runDiagnosis}>▶ 运行诊断</button></div>
     </header>
-    <div className="flow-body">
+    <div className={`flow-body ${sidebarCollapsed?"sidebar-collapsed":""}`}>
       <aside className="node-palette">
+        <button className="sidebar-collapse-button" aria-label={sidebarCollapsed?"展开左侧栏":"收起左侧栏"} title={sidebarCollapsed?"展开左侧栏":"收起左侧栏"} onClick={()=>setSidebarCollapsed((value)=>!value)}>{sidebarCollapsed?"›":"‹"}</button>
         <div className="palette-head"><h1>{sidebarMode==="nodes"?"节点工具箱":"历史数据"}</h1><p>{sidebarMode==="nodes"?"常用组合优先，基础节点仍可自由搭建":"拖到画布或已有波形节点"}</p></div>
         <div className="sidebar-tabs" role="tablist" aria-label="左侧面板"><button role="tab" aria-selected={sidebarMode==="nodes"} className={sidebarMode==="nodes"?"active":""} onClick={()=>setSidebarMode("nodes")}>节点工具箱</button><button role="tab" aria-selected={sidebarMode==="history"} className={sidebarMode==="history"?"active":""} onClick={()=>setSidebarMode("history")}>历史数据</button></div>
         {sidebarMode==="nodes"&&<><div className="source-import-tip"><span>i</span><div><strong>默认画布已改为精简组合实例</strong><small>组合模块处理固定链路，基础节点保留自由度</small></div></div><div className="quick-params"><label>新波形采样频率<input value={defaultFs} type="number" onChange={(event)=>setDefaultFs(Number(event.target.value)||1)}/><em>Hz</em></label><label>设备转速备注<input value={rpm} type="number" onChange={(event)=>setRpm(Number(event.target.value)||0)}/><em>rpm</em></label></div><div className="palette-scroll classified-palette">{palette.map((group,index)=><details key={group.group} open={index===0}><summary><span>{group.group}</span><b>{group.items.length}</b></summary>{group.items.map((item)=><div className="palette-node" key={`${item.kind}-${item.title}`} draggable onDragStart={(event)=>{event.dataTransfer.effectAllowed="copy";event.dataTransfer.setData("application/x-vibrule-node",JSON.stringify(item));}}><span>{item.icon}</span><div><strong>{item.title}</strong><small>{item.desc}</small></div><b>⠿</b></div>)}</details>)}</div></>}
