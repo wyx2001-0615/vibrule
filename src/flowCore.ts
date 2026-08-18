@@ -199,71 +199,11 @@ export const nodeMeta: Record<NodeKind, { icon: string; label: string }> = {
 };
 
 export const palette: { group: string; items: PaletteItem[] }[] = [
-  { group: "常用组合模块", items: [
-    { kind: "metricRatioCompare", family: "metric", title: "双工况指标比较", icon: "R⇄", desc: "指标比值 + 阈值判断", defaults: { metric: "rms", compareOp: ">" } },
-    { kind: "rotationFrequency", family: "signal", title: "转频识别", icon: "fr", desc: "积分 + 频谱 + 谐波组", defaults: { highpassHz: 2, minProminence: 1.18, minDistanceHz: 2, maxPeaks: 60, harmonicOrders: "1,2,3", toleranceHz: 1.8 } },
-    { kind: "candidateScreen", family: "spectrum", title: "候选频率筛选", icon: "F?", desc: "限频 + 剔除转频 + 双阈值", defaults: { bandMultiplier: 10, excludeEndOrder: 30, minProminence: 1.12, minDistanceHz: 1, maxPeaks: 120, toleranceHz: 1.5, windowHz: 3 } },
-    { kind: "differenceBands", family: "spectrum", title: "差谱选带", icon: "ΔB", desc: "差谱 + 能量排序 + 频带", defaults: { windowHz: 120, stepHz: 40, count: 3, halfWidthHz: 120, minProminence: 1.05, minDistanceHz: 80, maxPeaks: 12 } },
-    { kind: "envelopeSpectrum", family: "signal", title: "多频带包络谱", icon: "ENV", desc: "带通 + 希尔伯特 + FFT" },
-    { kind: "cageSearch", family: "spectrum", title: "保持架频率搜索", icon: "fc", desc: "0.6/0.4fr 自动回退", defaults: { primaryRatio: 0.6, fallbackRatio: 0.4, halfWidthHz: 2, minProminence: 1.08, minDistanceHz: 0.5, maxPeaks: 20 } },
-    { kind: "spectrumPresence", family: "condition", title: "多频谱频率验证", icon: "✓f", desc: "跨频带寻峰并统计命中", defaults: { toleranceHz: 2, minHits: 2 } },
-    { kind: "integerRelation", family: "condition", title: "整数倍双向互证", icon: "n×", desc: "倍数偏差 + 阶次范围 + 反向峰", defaults: { deviationLimit: 0.1, minOrder: 6, maxOrder: 12, toleranceHz: 2 } },
-  ] },
-  { group: "数据输入", items: [
-    { kind: "source", family: "source", title: "振动波形", icon: "∿", desc: "TXT / CSV" },
-    { kind: "constant", family: "math", title: "常数值", icon: "C", desc: "名称 / 数值 / 单位", defaults: { numberValue: 1, unit: "—" } },
-  ] },
-  { group: "指标计算", items: [
-    { kind: "metric", family: "metric", title: "有效值计算", icon: "R", desc: "RMS", defaults: { metric: "rms" } },
-    { kind: "metric", family: "metric", title: "峭度计算", icon: "K", desc: "冲击指标", defaults: { metric: "kurtosis" } },
-    { kind: "metric", family: "metric", title: "峰值计算", icon: "P", desc: "最大绝对幅值", defaults: { metric: "peak" } },
-    { kind: "metric", family: "metric", title: "峰值因子", icon: "CF", desc: "峰值 / RMS", defaults: { metric: "crest" } },
-  ] },
-  { group: "数学运算", items: [
-    { kind: "math", family: "math", title: "数学运算", icon: "±", desc: "+ − × ÷ 幂", defaults: { operation: "/" } },
-    { kind: "absolute", family: "math", title: "绝对值", icon: "|x|", desc: "数值 / 列表 / 频谱" },
-    { kind: "round", family: "math", title: "取整", icon: "≈", desc: "四舍五入 / 向上 / 向下", defaults: { roundMode: "round" } },
-  ] },
-  { group: "条件与流程", items: [
-    { kind: "compare", family: "condition", title: "数值比较", icon: ">", desc: "A 与 B 比较", defaults: { compareOp: ">" } },
-    { kind: "logic", family: "condition", title: "逻辑组合", icon: "&", desc: "AND / OR / NOT", defaults: { logic: "AND" } },
-    { kind: "gate", family: "condition", title: "条件门", icon: "G", desc: "条件满足才传递数据" },
-    { kind: "select", family: "condition", title: "条件选择", icon: "S", desc: "条件决定 A / B" },
-  ] },
-  { group: "信号处理", items: [
-    { kind: "integrate", family: "signal", title: "时域积分", icon: "∫", desc: "加速度转速度", defaults: { highpassHz: 2 } },
-    { kind: "bandpass", family: "signal", title: "带通滤波", icon: "BP", desc: "波形 × 频带" },
-    { kind: "hilbert", family: "signal", title: "希尔伯特包络", icon: "H", desc: "输出包络信号" },
-    { kind: "fft", family: "signal", title: "FFT 频谱", icon: "F", desc: "单边幅值谱" },
-  ] },
-  { group: "频谱分析", items: [
-    { kind: "alignSpectrum", family: "spectrum", title: "频谱对齐", icon: "≋", desc: "统一频率分辨率" },
-    { kind: "bandSlice", family: "spectrum", title: "频段截取", icon: "[ ]", desc: "按范围提取频谱" },
-    { kind: "peakDetect", family: "spectrum", title: "局部峰值检测", icon: "⌃", desc: "突出度 / 峰间距", defaults: { minProminence: 1.15, minDistanceHz: 1, maxPeaks: 80 } },
-    { kind: "harmonicSearch", family: "spectrum", title: "谐波关系搜索", icon: "1×", desc: "连续倍频峰组", defaults: { harmonicOrders: "1,2,3", toleranceHz: 1.5 } },
-    { kind: "harmonicSequence", family: "spectrum", title: "倍频序列", icon: "n×", desc: "生成 1×…N×", defaults: { startOrder: 1, endOrder: 5 } },
-    { kind: "frequencyExclude", family: "spectrum", title: "频率剔除", icon: "⊘", desc: "按频率列表去除峰值", defaults: { toleranceHz: 1.5 } },
-    { kind: "totalEnergy", family: "spectrum", title: "频谱总能量", icon: "E", desc: "ΣA²" },
-    { kind: "peakEnergyRatio", family: "spectrum", title: "峰值能量占比", icon: "%", desc: "单峰能量 / 总能量" },
-    { kind: "localContrast", family: "spectrum", title: "局部背景对比", icon: "Δ", desc: "峰值 / 左右均值", defaults: { windowHz: 3 } },
-    { kind: "slidingEnergy", family: "spectrum", title: "滑动频带能量", icon: "▰", desc: "生成能量曲线", defaults: { windowHz: 120, stepHz: 40 } },
-    { kind: "bandConstruct", family: "spectrum", title: "频带构造", icon: "↔", desc: "中心频率 ± 带宽" },
-    { kind: "frequencyMatch", family: "spectrum", title: "频率匹配", icon: "◎", desc: "理论频率附近寻峰", defaults: { toleranceHz: 2 } },
-  ] },
-  { group: "列表处理", items: [
-    { kind: "listCount", family: "list", title: "列表计数", icon: "#", desc: "数量 / True数量" },
-    { kind: "listFilter", family: "list", title: "列表筛选", icon: "⌁", desc: "按布尔掩码保留" },
-    { kind: "listSort", family: "list", title: "列表排序", icon: "⇅", desc: "频率 / 幅值 / 能量", defaults: { sortDirection: "desc", sortField: "amplitude" } },
-    { kind: "topN", family: "list", title: "前 N 项", icon: "N", desc: "取列表前若干项", defaults: { count: 3 } },
-    { kind: "minmax", family: "list", title: "最值选择", icon: "↕", desc: "最大 / 最小", defaults: { sortDirection: "desc", selectField: "value", outputField: "value" } },
-    { kind: "listItem", family: "list", title: "列表取项", icon: "[i]", desc: "读取指定序号", defaults: { index: 0 } },
-    { kind: "listMerge", family: "list", title: "列表合并", icon: "∪", desc: "合并多个数值或列表" },
-    { kind: "fieldExtract", family: "list", title: "字段提取", icon: ".f", desc: "提取频率 / 幅值", defaults: { selectField: "frequency" } },
-  ] },
-  { group: "诊断输出", items: [
-    { kind: "display", family: "display", title: "数据显示", icon: "▥", desc: "波形 / 频谱 / 列表", defaults: { displayMode: "auto" } },
-    { kind: "output", family: "output", title: "诊断结果", icon: "!", desc: "可编辑结论", defaults: { resultText: "规则条件成立" } },
-    { kind: "report", family: "report", title: "报告导出", icon: "W", desc: "下载 Word" },
+  { group: "基础节点", items: [
+    { kind: "source", family: "source", title: "波形导入", icon: "∿", desc: "导入 TXT / CSV 振动数据" },
+    { kind: "display", family: "display", title: "波形展示", icon: "▥", desc: "查看波形或频谱数据", defaults: { displayMode: "auto" } },
+    { kind: "fft", family: "signal", title: "FFT 节点", icon: "F", desc: "计算单边幅值频谱" },
+    { kind: "math", family: "math", title: "加减法运算", icon: "±", desc: "两个输入相加或相减", defaults: { operation: "+" } },
   ] },
 ];
 
