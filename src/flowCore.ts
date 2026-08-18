@@ -99,6 +99,8 @@ export type FlowNode = {
   title: string;
   x: number;
   y: number;
+  samplingFrequency?: number;
+  rpm?: number;
   metric?: "rms" | "peak" | "kurtosis" | "crest";
   numberValue?: number;
   unit?: string;
@@ -200,7 +202,7 @@ export const nodeMeta: Record<NodeKind, { icon: string; label: string }> = {
 
 export const palette: { group: string; items: PaletteItem[] }[] = [
   { group: "基础节点", items: [
-    { kind: "source", family: "source", title: "波形导入", icon: "∿", desc: "导入 TXT / CSV 振动数据" },
+    { kind: "source", family: "source", title: "波形导入", icon: "∿", desc: "导入 TXT / CSV 振动数据", defaults: { samplingFrequency: 10240, rpm: 1500 } },
     { kind: "display", family: "display", title: "波形展示", icon: "▥", desc: "查看波形或频谱数据", defaults: { displayMode: "auto" } },
     { kind: "fft", family: "signal", title: "FFT 节点", icon: "F", desc: "计算单边幅值频谱" },
     { kind: "math", family: "math", title: "加减法运算", icon: "±", desc: "两个输入相加或相减", defaults: { operation: "+" } },
@@ -258,8 +260,8 @@ function edge(source: string, target: string, targetPort = "input"): Connection 
 }
 
 export const exampleNodes: FlowNode[] = [
-  node("normal", "source", "source", "正常工况波形", 0, 80),
-  node("fault", "source", "source", "疑似故障波形", 0, 360),
+  node("normal", "source", "source", "正常工况波形", 0, 80, { samplingFrequency: 10240, rpm: 1500 }),
+  node("fault", "source", "source", "疑似故障波形", 0, 360, { samplingFrequency: 10240, rpm: 1500 }),
   node("th-a", "constant", "math", "阈值 th_a", 270, 40, { numberValue: 1.2, unit: "—" }),
   node("rms-check", "metricRatioCompare", "metric", "RMS 比值初筛", 540, 80, { metric: "rms", compareOp: ">" }),
   node("th-b", "constant", "math", "阈值 th_b", 270, 470, { numberValue: 1.25, unit: "—" }),
